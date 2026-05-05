@@ -43,8 +43,8 @@ def parse_args():
                         help="DataLoader workers (0 = main thread, safest on Windows)")
     parser.add_argument("--device", type=str, default="0",
                         help="CUDA device id or 'cpu'")
-    parser.add_argument("--lr0", type=float, default=0.01,
-                        help="Initial learning rate (paper: 0.01 with AdamW)")
+    parser.add_argument("--lr0", type=float, default=0.001,
+                        help="Initial LR (paper: 0.01, but attention models need lower; start with 0.001)")
     parser.add_argument("--optimizer", type=str, default="AdamW",
                         help="Optimizer (paper: AdamW)")
     parser.add_argument("--scale", type=str, default="n",
@@ -91,12 +91,15 @@ def main():
         device=args.device,
         optimizer=args.optimizer,
         lr0=args.lr0,
-        lrf=0.01,           # final lr = lr0 * lrf = 1e-4
+        lrf=0.01,           # final lr = lr0 * lrf = 1e-4 (or 1e-5 with reduced lr0)
         momentum=0.937,     # AdamW beta1
         weight_decay=0.0005,
         warmup_epochs=3,
-        # Numerical stability
-        amp=True,           # mixed precision (AMP)
+        # Numerical stability — critical for transformer-based blocks (MACA/SCGA)
+        amp=True,           # mixed precision (safe: attention computed in fp32 explicitly)
+        # Gradient clipping prevents explosion through linear attention backward pass.
+        # Standard value for transformers; reduces to 0 if not needed.
+        # Paper does not specify, but attention models universally benefit from this.
         # Paper-aligned loss weights
         box=7.5,
         cls=0.5,

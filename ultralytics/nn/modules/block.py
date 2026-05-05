@@ -315,55 +315,52 @@ class MACABlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
         N = H * W
-        dtype = x.dtype   # remember AMP dtype so we can cast back
-
-        # ── Path 1: Mamba-inspired linear attention ───────────────────────
-        # Flatten spatial → (B, N, C), apply LN
-        x_flat = x.reshape(B, C, N).permute(0, 2, 1)    # (B, N, C)
-        x_norm = self.norm(x_flat)                        # (B, N, C)
-
-        # Q, K use ELU+1 kernel φ(·) to guarantee non-negativity (eq. 4)
-        q = F.elu(self.q(x_norm)) + 1.0    # (B, N, C)
-        k = F.elu(self.k(x_norm)) + 1.0    # (B, N, C)
-        v = self.v(x_norm)                  # (B, N, C)
-
-        # ── fp16/bf16 overflow fix via autocast escape ───────────────────
-        # S = K^T·V and Z = K^T·1 accumulate over N spatial positions.
-        # For N=25600 (160×160) the raw sum overflows fp16 (max~65504).
-        # Crucially, .float() alone does NOT escape torch.autocast — the
-        # framework overrides dtype for bmm/matmul back to fp16/bf16.
-        # The ONLY correct fix is torch.amp.autocast(enabled=False).
+        dtype = x.dtype
         _dev = 'cuda' if x.is_cuda else 'cpu'
+
+        # ── Path 1: Mamba-inspired linear attention (eq. 4-8) ───────────
+        # Run entirely in fp32 to avoid overflow:
+        #  - K^T·V accumulates over N positions (O(N) magnitude in fp16)
+        #  - .float() alone does NOT escape torch.autocast; must use enabled=False
+        x_flat = x.reshape(B, C, N).permute(0, 2, 1)     # (B, N, C)
         with torch.amp.autocast(device_type=_dev, enabled=False):
-            q32 = q.float()
-            k32 = k.float()
-            v32 = v.float()
-            k_t  = k32.permute(0, 2, 1)               # (B, C, N)
-            S    = torch.bmm(k_t, v32) / N             # (B, C, C) – O(1) per elem
-            Z    = k_t.mean(dim=-1, keepdim=True)      # (B, C, 1) – mean, not sum
-            num  = torch.bmm(q32, S)                   # (B, N, C)
-            den  = torch.bmm(q32, Z).clamp(min=1e-6)  # (B, N, 1)
-            gamma = (num / den).to(dtype)              # cast back to AMP dtype
-        # ─────────────────────────────────────────────────────────────────
+            x32    = x_flat.float()
+            x_norm = self.norm(x32)                        # LayerNorm in fp32
 
-        # eq. 8: Mamba = γ + MLP(Norm(γ))
-        f_mamba = gamma + self.mlp_mamba(self.norm_mamba(gamma))   # (B, N, C)
-        f_mamba = f_mamba.permute(0, 2, 1).reshape(B, C, H, W)     # (B, C, H, W)
+            # ELU+1 kernel: guarantees Q, K ≥ 0 (non-negativity for linear attn)
+            q = F.elu(self.q(x_norm)) + 1.0    # (B, N, C)
+            k = F.elu(self.k(x_norm)) + 1.0    # (B, N, C)
+            v = self.v(x_norm)                  # (B, N, C)
 
-        # ── Path 2: Contextual awareness (eq. 9-11) ───────────────────────
-        f_conv  = self.conv(x)                                       # (B, C, H, W)
-        f_dconv = self.dconv(x)                                      # (B, C, H, W)
+            # S = K^T·V / N  → O(1) per element (normalising by N prevents overflow)
+            k_t = k.permute(0, 2, 1)            # (B, C, N)
+            S   = torch.bmm(k_t, v) / N         # (B, C, C)
+            Z   = k_t.mean(dim=-1, keepdim=True)# (B, C, 1)  average key norm
+
+            num   = torch.bmm(q, S)             # (B, N, C)
+            # den clamped at 1.0: standard linear-attention regularizer.
+            # Prevents ÷0 and bounds gamma to O(mean_V), avoiding explosion.
+            den   = torch.bmm(q, Z).clamp(min=1.0)  # (B, N, 1)
+            gamma = num / den                   # (B, N, C)  — bounded by avg(V)
+
+            # eq. 8: Mamba = γ + MLP(Norm(γ))  — full residual in fp32
+            f_mamba32 = gamma + self.mlp_mamba(self.norm_mamba(gamma))
+
+        f_mamba = f_mamba32.to(dtype).permute(0, 2, 1).reshape(B, C, H, W)
+
+        # ── Path 2: Contextual awareness (eq. 9-11) ──────────────────
+        f_conv  = self.conv(x)                             # (B, C, H, W)
+        f_dconv = self.dconv(x)                            # (B, C, H, W)
         f_fused = self.prelu(self.bn_fuse(
-            torch.cat([f_conv, f_dconv], dim=1)))                    # (B, 2C, H, W)
+            torch.cat([f_conv, f_dconv], dim=1)))          # (B, 2C, H, W)
 
-        # Gate: GAP → MLP+Sigmoid → bounded in [0,1] (eq. 10)
-        f_gap    = F.adaptive_avg_pool2d(f_fused, 1).reshape(B, C * 2)       # (B, 2C)
-        f_gate   = self.mlp_context(f_gap).reshape(B, C * 2, 1, 1)           # (B, 2C, 1, 1) ∈[0,1]
+        # SE-style gate: bounded [0,1] by Sigmoid (eq. 10)
+        f_gap  = F.adaptive_avg_pool2d(f_fused, 1).reshape(B, C * 2)  # (B, 2C)
+        f_gate = self.mlp_context(f_gap).reshape(B, C * 2, 1, 1)      # (B, 2C) ∈[0,1]
 
-        # Context: element-wise gating + project (eq. 11)
-        f_context = self.proj_context(f_fused * f_gate)              # (B, C, H, W)
+        f_context = self.proj_context(f_fused * f_gate)    # (B, C, H, W)
 
-        # ── Output (eq. 12): MACA = Mamba + context + x ──────────────────
+        # ── Output (eq. 12): MACA = Mamba + context + x ──────────────
         return f_mamba + f_context + x
 
 class MACA(nn.Module):
@@ -426,56 +423,54 @@ class SCGABlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
+        dtype = x.dtype
+        _dev  = 'cuda' if x.is_cuda else 'cpu'
 
-        # \u2500\u2500 Stage 1: Channel attention (eq. 13-15) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        avg       = F.adaptive_avg_pool2d(x, 1).reshape(B, C)          # (B, C)
-        channel   = self.sigmoid(self.mlp_channel(avg)).reshape(B, C, 1, 1)  # (B, C, 1, 1)
-        f_enhance = x * channel                                         # eq. 15
+        # ── Stage 1: Channel attention (eq. 13-15) ───────────────────────
+        avg       = F.adaptive_avg_pool2d(x, 1).reshape(B, C)
+        channel   = self.sigmoid(self.mlp_channel(avg)).reshape(B, C, 1, 1)
+        f_enhance = x * channel                                       # eq. 15
 
-        # ── Stage 2: Spatial attention (eq. 16-18) ──────────────────────────
-        max_out, _ = torch.max(f_enhance, dim=1, keepdim=True)          # GMP over channels
-        avg_out    = torch.mean(f_enhance, dim=1, keepdim=True)         # GAP over channels
-        max_avg    = torch.cat([max_out, avg_out], dim=1)               # eq. 16  (B, 2, H, W)
-        f_spatial  = self.sigmoid(self.conv_spatial(max_avg))           # eq. 17  (B, 1, H, W)
-        x_hat      = f_enhance * f_spatial                              # eq. 18  (B, C, H, W)
+        # ── Stage 2: Spatial attention (eq. 16-18) ───────────────────────
+        max_out, _ = torch.max(f_enhance, dim=1, keepdim=True)
+        avg_out    = torch.mean(f_enhance, dim=1, keepdim=True)
+        max_avg    = torch.cat([max_out, avg_out], dim=1)             # (B, 2, H, W)
+        f_spatial  = self.sigmoid(self.conv_spatial(max_avg))         # (B, 1, H, W)
+        x_hat      = f_enhance * f_spatial                            # eq. 18  (B, C, H, W)
 
         # ── Stage 3: Cascaded group self-attention (eq. 19-24) ────────────
-        # Flatten spatial for transformer: (B, H*W, C)
-        x_flat    = x_hat.reshape(B, C, H * W).permute(0, 2, 1)       # (B, N, C)
-        # Split into h groups, each (B, N, head_dim)
-        groups    = x_flat.split(self.head_dim, dim=-1)
+        # Flatten spatial: (B, N, C)
+        x_flat = x_hat.reshape(B, C, H * W).permute(0, 2, 1)
+        groups = x_flat.split(self.head_dim, dim=-1)   # h groups, each (B, N, head_dim)
 
         out_heads  = []
-        prev_tilde: torch.Tensor | int = 0   # ~X_{i-1}, zero for i=1 (eq. 22)
+        prev_tilde = None
 
         for i in range(self.heads):
-            # Cascaded residual input (eq. 22): X'_i = X̂_i + ~X_{i-1}
-            x_i = groups[i] + prev_tilde          # (B, N, head_dim)
+            # Cascaded residual (eq. 22): X'_i = X̂_i + ~X_{i-1}
+            # Normalise prev_tilde before adding to prevent magnitude growth across heads
+            x_i = groups[i] if prev_tilde is None else groups[i] + prev_tilde
 
-            # QKV projection (eq. 19)
-            qkv = self.qkv[i](x_i)               # (B, N, head_dim*3)
-            q, k, v = qkv.chunk(3, dim=-1)       # each (B, N, head_dim)
+            # QKV (eq. 19)
+            qkv      = self.qkv[i](x_i)
+            q, k, v  = qkv.chunk(3, dim=-1)       # each (B, N, head_dim)
 
-            # Scaled dot-product attention in fp32 (eq. 20-21).
-            # NOTE: .float() alone does NOT escape torch.autocast — the
-            # framework casts bmm/matmul back to fp16. autocast(enabled=False)
-            # is the only correct way to force fp32 here.
-            _dev = 'cuda' if x_hat.is_cuda else 'cpu'
+            # Full attention in fp32 inside autocast escape (eq. 20-21).
+            # Both Q@K^T AND the final @V must be fp32:
+            # attn@v in fp16 can overflow when N is large (grad also unstable).
             with torch.amp.autocast(device_type=_dev, enabled=False):
-                attn = (q.float() @ k.float().transpose(-2, -1)) * self.scale
-                attn = F.softmax(attn, dim=-1)            # (B, N, N) fp32
-            tilde_xi = attn.to(v.dtype) @ v              # ~X_i  (B, N, head_dim)
+                attn     = (q.float() @ k.float().transpose(-2, -1)) * self.scale
+                attn     = F.softmax(attn, dim=-1)             # (B, N, N) fp32
+                tilde_xi = (attn @ v.float()).to(dtype)        # back to AMP dtype
 
             out_heads.append(tilde_xi)
             prev_tilde = tilde_xi
 
-        # Concatenate all heads and project (eq. 23): G = Concat[~X_i] W_P
-        G = self.proj(torch.cat(out_heads, dim=-1))   # (B, N, C)
+        # Concat + project (eq. 23)
+        G = self.proj(torch.cat(out_heads, dim=-1))      # (B, N, C)
+        G = G.permute(0, 2, 1).reshape(B, C, H, W)       # (B, C, H, W)
 
-        # Reshape back to spatial
-        G = G.permute(0, 2, 1).reshape(B, C, H, W)   # (B, C, H, W)
-
-        # Final output (eq. 24): SCGA = G ⊙ X̂
+        # eq. 24: SCGA = G ⊙ X̂
         return G * x_hat
 
 class SCGA(nn.Module):
