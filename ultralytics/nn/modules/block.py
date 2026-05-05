@@ -327,21 +327,24 @@ class MACABlock(nn.Module):
         k = F.elu(self.k(x_norm)) + 1.0    # (B, N, C)
         v = self.v(x_norm)                  # (B, N, C)
 
-        # ── fp16 overflow fix ─────────────────────────────────────────────
-        # S = K^T V accumulates over N positions → magnitude O(N).
-        # For N=25600 (160×160) this overflows fp16 (max~65504).
-        # Solution: normalise by N so S, Z, num, den are all O(1), then
-        # the ratio γ = num/den is unchanged (N cancels) but never overflows.
-        q32 = q.float()
-        k32 = k.float()
-        v32 = v.float()
-        k_t = k32.permute(0, 2, 1)                        # (B, C, N)
-        S   = torch.bmm(k_t, v32) / N                     # (B, C, C)  O(1) per elem
-        Z   = k_t.mean(dim=-1, keepdim=True)              # (B, C, 1)  mean instead of sum
-        num = torch.bmm(q32, S)                           # (B, N, C)
-        den = torch.bmm(q32, Z).clamp(min=1e-6)           # (B, N, 1)  no ÷0
-        gamma = (num / den).to(dtype)                     # cast back to AMP dtype
-        # ──────────────────────────────────────────────────────────────────
+        # ── fp16/bf16 overflow fix via autocast escape ───────────────────
+        # S = K^T·V and Z = K^T·1 accumulate over N spatial positions.
+        # For N=25600 (160×160) the raw sum overflows fp16 (max~65504).
+        # Crucially, .float() alone does NOT escape torch.autocast — the
+        # framework overrides dtype for bmm/matmul back to fp16/bf16.
+        # The ONLY correct fix is torch.amp.autocast(enabled=False).
+        _dev = 'cuda' if x.is_cuda else 'cpu'
+        with torch.amp.autocast(device_type=_dev, enabled=False):
+            q32 = q.float()
+            k32 = k.float()
+            v32 = v.float()
+            k_t  = k32.permute(0, 2, 1)               # (B, C, N)
+            S    = torch.bmm(k_t, v32) / N             # (B, C, C) – O(1) per elem
+            Z    = k_t.mean(dim=-1, keepdim=True)      # (B, C, 1) – mean, not sum
+            num  = torch.bmm(q32, S)                   # (B, N, C)
+            den  = torch.bmm(q32, Z).clamp(min=1e-6)  # (B, N, 1)
+            gamma = (num / den).to(dtype)              # cast back to AMP dtype
+        # ─────────────────────────────────────────────────────────────────
 
         # eq. 8: Mamba = γ + MLP(Norm(γ))
         f_mamba = gamma + self.mlp_mamba(self.norm_mamba(gamma))   # (B, N, C)
@@ -453,11 +456,15 @@ class SCGABlock(nn.Module):
             qkv = self.qkv[i](x_i)               # (B, N, head_dim*3)
             q, k, v = qkv.chunk(3, dim=-1)       # each (B, N, head_dim)
 
-            # Compute in fp32 to avoid overflow when N is large (e.g. 6400 for P3).
-            # Q@K^T can reach ~N * head_dim in magnitude before scaling → overflows fp16.
-            attn = (q.float() @ k.float().transpose(-2, -1)) * self.scale  # (B, N, N) fp32
-            attn = F.softmax(attn, dim=-1).to(x_hat.dtype)                 # back to AMP dtype
-            tilde_xi = attn @ v                   # ~X_i  (B, N, head_dim)
+            # Scaled dot-product attention in fp32 (eq. 20-21).
+            # NOTE: .float() alone does NOT escape torch.autocast — the
+            # framework casts bmm/matmul back to fp16. autocast(enabled=False)
+            # is the only correct way to force fp32 here.
+            _dev = 'cuda' if x_hat.is_cuda else 'cpu'
+            with torch.amp.autocast(device_type=_dev, enabled=False):
+                attn = (q.float() @ k.float().transpose(-2, -1)) * self.scale
+                attn = F.softmax(attn, dim=-1)            # (B, N, N) fp32
+            tilde_xi = attn.to(v.dtype) @ v              # ~X_i  (B, N, head_dim)
 
             out_heads.append(tilde_xi)
             prev_tilde = tilde_xi
