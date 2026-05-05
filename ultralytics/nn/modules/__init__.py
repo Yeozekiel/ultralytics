@@ -59,6 +59,11 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    WaveletDown,
+    WaveletUp,
+    WaveletDetailBlock,
+    MACA,
+    SCGA,
 )
 from .conv import (
     CBAM,
@@ -75,6 +80,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    WTConv,
 )
 from .head import (
     OBB,
@@ -187,4 +193,10 @@ __all__ = (
     "YOLOESegment",
     "YOLOESegment26",
     "v10Detect",
+    "WaveletDown",
+    "WaveletUp",
+    "WaveletDetailBlock",
+    "WTConv",
+    "MACA",
+    "SCGA",
 )

@@ -8,6 +8,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+from pytorch_wavelets import DWTForward
 
 __all__ = (
     "CBAM",
@@ -24,6 +25,7 @@ __all__ = (
     "LightConv",
     "RepConv",
     "SpatialAttention",
+    "WTConv",
 )
 
 
@@ -35,6 +37,25 @@ def autopad(k, p=None, d=1):  # kernel, padding, dilation
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
 
+class WTConv(nn.Module):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
+        super().__init__()
+        self.dwt = DWTForward(J=1, wave='db1') 
+        # Low-frequency branch
+        self.cv_low = Conv(c1, c2, k, s, p, g, act=act)
+        # High-frequency branch (3 sub-bands: LH, HL, HH)
+        self.cv_high = Conv(c1 * 3, c2, k, s, p, g, act=act)
+
+        self.cv_final = nn.Conv2d(c2 * 2, c2, 1, 1, bias=False)
+
+    def forward(self, x):
+        yl, yh = self.dwt(x)
+        # Reshape high-frequency dari [B, C, 3, H, W] ke [B, C*3, H, W]
+        yh_reshaped = yh[0].reshape(yh[0].shape[0], -1, yh[0].shape[3], yh[0].shape[4])
+        
+        out_low = self.cv_low(yl)
+        out_high = self.cv_high(yh_reshaped)
+        return self.cv_final(torch.cat([out_low, out_high], dim=1))
 
 class Conv(nn.Module):
     """Standard convolution module with batch normalization and activation.
@@ -611,6 +632,8 @@ class CBAM(nn.Module):
             (torch.Tensor): Attended output tensor.
         """
         return self.spatial_attention(self.channel_attention(x))
+
+
 
 
 class Concat(nn.Module):

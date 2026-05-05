@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
+from pytorch_wavelets import DWTForward, DWTInverse
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
@@ -52,8 +53,360 @@ __all__ = (
     "ResNetLayer",
     "SCDown",
     "TorchVision",
+    "WaveletDown",
+    "WaveletUp",
+    "MACA",
+    "SCGA",
 )
 
+class WaveletActivation(nn.Module):
+    """
+    Fungsi aktivasi wavelet sebagai pengganti ReLU (post-fusion).
+    Diinisialisasi beta=0.5 sebagai learnable parameter.
+    """
+    def __init__(self, beta: float = 0.5):
+        super().__init__()
+        self.beta = nn.Parameter(torch.ones(1) * beta)
+ 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cos(self.beta * x) * torch.exp(-(x ** 2) / 2)
+
+# class WaveletDown(nn.Module):
+#     def __init__(self, c1, c2, wave='db1'):
+#         super().__init__()
+#         self.dwt = DWTForward(J=1, wave=wave)
+#         self.conv = nn.Conv2d(c1, c2, 1) # Penyelaras channel
+
+#     def forward(self, x):
+#         yl, yh = self.dwt(x)
+#         return self.conv(yl), yh[0] # Return fitur LL dan koefisien detail
+
+class WaveletDown(nn.Module):
+    def __init__(self, c1: int, c2: int, wave: str = 'db1'):
+        super().__init__()
+        self.dwt = DWTForward(J=1, wave=wave, mode='zero')
+        self.conv = nn.Conv2d(c1, c2, kernel_size=1, bias=False)
+        self.bn   = nn.BatchNorm2d(c2)
+        self.act  = nn.SiLU()
+ 
+    def forward(self, x: torch.Tensor):
+        yl, yh = self.dwt(x)           # yl: (B, C, H/2, W/2)
+        # yh[0]: (B, C, 3, H/2, W/2)  ← detail coefficients (LH, HL, HH)
+        ll = self.act(self.bn(self.conv(yl)))
+        return ll, yh[0]               # ll untuk backbone berikutnya,
+                                       # yh[0] disimpan untuk WaveletUp
+
+# class WaveletUp(nn.Module):
+#     def __init__(self, c1, c2, c_high, wave='db1'):
+#         super().__init__()
+#         self.idwt = DWTInverse(wave=wave)
+#         if c1 != c_high:
+#             self.align_conv = nn.Conv2d(c1, c_high, 1, 1, bias=False)
+#         else:
+#             self.align_conv = nn.Identity()
+#         self.conv = nn.Conv2d(c_high, c2, 1)
+#         self.act = WaveletActivation(beta=0.5)
+#         # self.bn = nn.BatchNorm2d(c_high)
+#         self.gamma = nn.Parameter(torch.ones(1) * 1.5)
+
+#     def forward(self, x_low, x_high):
+#         # x_high harus dalam format list untuk DWTInverse
+#         # Penyelarasan channel fitur LL
+#         x_low_aligned = self.align_conv(x_low)
+        
+#         # 1. Jalur Wavelet (IDWT) - Spesialis Detail & Tekstur Spikula
+#         out_wavelet = self.idwt((x_low_aligned, [x_high]))
+        
+#         # 2. Jalur Standar (Bilinear) - Spesialis Fitur Semantik & Blob Samar
+#         # Kita gunakan bilinear agar transisinya halus, menjaga Recall pada massa yang fuzzy.
+#         out_standard = F.interpolate(x_low_aligned, scale_factor=2, mode='bilinear', align_corners=False)
+        
+#         # 3. Hybrid Fusion (Residual Style)
+#         # Menyatukan detail tajam dan fitur semantik halus
+#         out_wavelet = self.act(out_wavelet)
+
+#         return self.conv(out_wavelet + (self.gamma * out_standard))
+
+class DirectionalSubbandAttention(nn.Module):
+    """
+    Ultra-lightweight Channel-Aware Adaptive weighting untuk koefisien wavelet detail.
+    Hanya menggunakan 12 parameter (Linear 3->3) sehingga sangat cocok untuk dataset kecil.
+    """
+    def __init__(self, channels: int, reduction: int = 4):
+        super().__init__()
+        # Belajar interaksi antara 3 orientasi (LH, HL, HH) secara independen untuk tiap channel
+        self.fc = nn.Linear(3, 3)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x_high: torch.Tensor):
+        B, C, num_subbands, H, W = x_high.shape
+        
+        # 1. Global Average Pooling per subband per channel
+        # Menggunakan abs() karena koefisien wavelet bisa bernilai negatif
+        pooled = x_high.abs().mean(dim=[-2, -1])  # (B, C, 3)
+        
+        # 2. Hitung attention per channel secara independen
+        attn_weights = self.sigmoid(self.fc(pooled))  # (B, C, 3)
+        
+        # 3. Apply attention
+        attn = attn_weights.view(B, C, 3, 1, 1)
+        x_high_weighted = x_high * attn
+        
+        # Kembalikan rata-rata bobot across channel untuk keperluan logging/ablation
+        return x_high_weighted, attn_weights.mean(dim=1)
+
+
+class WaveletDetailBlock(nn.Module):
+    """
+    Ekstrak koefisien frekuensi tinggi (detail) dari input menggunakan DWT, 
+    proses dengan DSA (opsional), lalu konversi menjadi feature map tambahan.
+    Cocok digunakan sebagai ekstraktor paralel tanpa merusak tulang punggung YOLO.
+    """
+    def __init__(self, c1: int, c2: int, use_dsa: bool = True, wave: str = 'db1'):
+        super().__init__()
+        self.dwt = DWTForward(J=1, wave=wave, mode='zero')
+        self.use_dsa = use_dsa
+        if use_dsa:
+            self.dsa = DirectionalSubbandAttention(channels=c1, reduction=4)
+        
+        # c1 channels * 3 subbands -> c2 channels
+        self.conv = nn.Sequential(
+            nn.Conv2d(c1 * 3, c2, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(c2),
+            nn.SiLU()
+        )
+
+    def forward(self, x: torch.Tensor):
+        yl, yh = self.dwt(x)
+        x_high = yh[0]  # (B, c1, 3, H/2, W/2)
+        
+        if self.use_dsa:
+            x_high, _ = self.dsa(x_high)
+            
+        B, C, _, H, W = x_high.shape
+        # Flatten the 3 subbands into channels: (B, c1*3, H/2, W/2)
+        x_high = x_high.view(B, C * 3, H, W)
+        
+        return self.conv(x_high)
+
+class WaveletUp(nn.Module):
+    """
+    Hybrid upsampling: IDWT (detail-aware) + Bilinear (semantic-smooth).
+    Menggunakan Directional Subband Attention (DSA) pada koefisien detail.
+    """
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        c_high: int = -1,
+        wave: str = 'db1',
+        use_dsa: bool = True,
+    ):
+        super().__init__()
+        if c_high < 0:
+            c_high = c1
+
+        self.idwt = DWTInverse(wave=wave, mode='zero')
+
+        self.align_conv = (
+            nn.Sequential(
+                nn.Conv2d(c1, c_high, 1, bias=False),
+                nn.BatchNorm2d(c_high),
+                nn.SiLU(),
+            )
+            if c1 != c_high else nn.Identity()
+        )
+
+        self.use_dsa = use_dsa
+        if use_dsa:
+            self.dsa = DirectionalSubbandAttention(channels=c_high, reduction=4)
+
+        self.conv = nn.Conv2d(c_high, c2, kernel_size=1, bias=False)
+        self.bn   = nn.BatchNorm2d(c2)
+        
+        # WaveletActivation HANYA untuk jalur IDWT
+        self.wave_act = WaveletActivation(beta=0.5)
+        # SiLU untuk output akhir agar selaras dengan layer YOLO lainnya
+        self.act = nn.SiLU()
+        
+        # Gamma diinisialisasi 1.0 agar jalur standar tidak terlalu ditekan di awal
+        self.gamma = nn.Parameter(torch.ones(1) * 1.0)
+        self.last_attn = None
+
+    def forward(
+        self,
+        x_low: torch.Tensor,
+        x_high: torch.Tensor,
+    ) -> torch.Tensor:
+        x_low_aligned = self.align_conv(x_low)
+
+        if self.use_dsa:
+            x_high_weighted, attn_w = self.dsa(x_high)
+            self.last_attn = attn_w.detach()
+        else:
+            x_high_weighted = x_high
+            self.last_attn = None
+
+        # Jalur Wavelet dengan WaveletActivation
+        out_wavelet = self.idwt((x_low_aligned, [x_high_weighted]))
+        out_wavelet = self.wave_act(out_wavelet)
+
+        out_standard = F.interpolate(
+            x_low_aligned,
+            scale_factor=2,
+            mode='bilinear',
+            align_corners=False,
+        )
+
+        fused = out_wavelet + (self.gamma * out_standard)
+        out = self.act(self.bn(self.conv(fused)))
+
+        return out
+
+class MACABlock(nn.Module):
+    """Single MACA block."""
+    def __init__(self, c1: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(c1)
+        self.q = nn.Linear(c1, c1, bias=False)
+        self.k = nn.Linear(c1, c1, bias=False)
+        self.v = nn.Linear(c1, c1, bias=False)
+        
+        self.mlp_mamba = nn.Sequential(
+            nn.Linear(c1, c1 * 2),
+            nn.GELU(),
+            nn.Linear(c1 * 2, c1)
+        )
+        self.norm_mamba = nn.LayerNorm(c1)
+        
+        self.conv = nn.Conv2d(c1, c1, kernel_size=3, padding=1, groups=c1, bias=False)
+        self.dconv = nn.Conv2d(c1, c1, kernel_size=3, padding=3, dilation=3, groups=c1, bias=False)
+        self.bn_fuse = nn.BatchNorm2d(c1 * 2)
+        self.prelu = nn.PReLU()
+        
+        self.mlp_context = nn.Sequential(
+            nn.Linear(c1 * 2, c1 * 2),
+            nn.ReLU(),
+            nn.Linear(c1 * 2, c1 * 2)
+        )
+        
+        self.proj_context = nn.Conv2d(c1 * 2, c1, kernel_size=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        
+        x_flat = x.view(B, C, -1).permute(0, 2, 1)
+        x_norm = self.norm(x_flat)
+        
+        q = F.elu(self.q(x_norm)) + 1.0
+        k = F.elu(self.k(x_norm)) + 1.0
+        v = self.v(x_norm)
+        
+        k_t = k.permute(0, 2, 1)
+        S = torch.bmm(k_t, v)
+        Z = k_t.sum(dim=-1, keepdim=True)
+        
+        num = torch.bmm(q, S)
+        den = q.bmm(Z) + 1e-6
+        gamma = num / den
+        
+        f_mamba = gamma + self.mlp_mamba(self.norm_mamba(gamma))
+        f_mamba = f_mamba.permute(0, 2, 1).view(B, C, H, W)
+        
+        f_conv = self.conv(x)
+        f_dconv = self.dconv(x)
+        f_fused = torch.cat([f_conv, f_dconv], dim=1)
+        f_fused = self.prelu(self.bn_fuse(f_fused))
+        
+        f_global = F.adaptive_avg_pool2d(f_fused, (1, 1)).view(B, C * 2)
+        f_global = self.mlp_context(f_global).view(B, C * 2, 1, 1)
+        
+        f_context = f_fused * f_global
+        f_context = self.proj_context(f_context)
+        
+        out = f_mamba + f_context + x
+        return out
+
+class MACA(nn.Module):
+    """Mamba-Inspired Attention with Contextual Awareness (MACA) module."""
+    def __init__(self, c1: int, c2: int = None, n: int = 1):
+        super().__init__()
+        c2 = c2 or c1
+        self.align = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
+        self.blocks = nn.Sequential(*(MACABlock(c2) for _ in range(n)))
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(self.align(x))
+
+class SCGABlock(nn.Module):
+    """Single SCGA Block."""
+    def __init__(self, c1: int, heads: int = 4):
+        super().__init__()
+        self.mlp_channel = nn.Sequential(
+            nn.Linear(c1, max(1, c1 // 4), bias=False),
+            nn.ReLU(),
+            nn.Linear(max(1, c1 // 4), c1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+        
+        self.conv_spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+        
+        self.heads = heads
+        self.head_dim = c1 // heads
+        
+        self.qkv = nn.ModuleList([nn.Linear(self.head_dim, self.head_dim * 3, bias=False) for _ in range(heads)])
+        self.proj = nn.Linear(c1, c1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        
+        avg_pool = F.adaptive_avg_pool2d(x, (1, 1)).view(B, C)
+        f_channel = self.sigmoid(self.mlp_channel(avg_pool)).view(B, C, 1, 1)
+        f_enhance = x * f_channel
+        
+        max_out, _ = torch.max(f_enhance, dim=1, keepdim=True)
+        avg_out = torch.mean(f_enhance, dim=1, keepdim=True)
+        spatial_cat = torch.cat([max_out, avg_out], dim=1)
+        f_spatial = self.sigmoid(self.conv_spatial(spatial_cat))
+        x_hat = f_enhance * f_spatial
+        
+        x_hat_flat = x_hat.view(B, C, H * W).permute(0, 2, 1)
+        head_splits = torch.split(x_hat_flat, self.head_dim, dim=-1)
+        
+        out_heads = []
+        prev_tilde = 0
+        
+        for i in range(self.heads):
+            x_i = head_splits[i] + prev_tilde
+            
+            qkv = self.qkv[i](x_i)
+            q, k, v = qkv.chunk(3, dim=-1)
+            
+            attn = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+            attn = F.softmax(attn, dim=-1)
+            tilde_x_i = attn @ v
+            
+            out_heads.append(tilde_x_i)
+            prev_tilde = tilde_x_i
+            
+        G = torch.cat(out_heads, dim=-1)
+        G = self.proj(G)
+        
+        G = G.permute(0, 2, 1).view(B, C, H, W)
+        
+        f_scga = G * x_hat
+        return f_scga
+
+class SCGA(nn.Module):
+    """Spatial and Channel Group Attention (SCGA) module."""
+    def __init__(self, c1: int, c2: int = None, n: int = 1, heads: int = 4):
+        super().__init__()
+        c2 = c2 or c1
+        self.align = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
+        self.blocks = nn.Sequential(*(SCGABlock(c2, heads=heads) for _ in range(n)))
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(self.align(x))
 
 class DFL(nn.Module):
     """Integral module of Distribution Focal Loss (DFL).
