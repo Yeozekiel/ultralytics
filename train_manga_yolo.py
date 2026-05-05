@@ -112,6 +112,7 @@ def main():
         resume=args.resume,
         plots=True,
         save=True,
+        amp=False,
         save_period=50,   # save checkpoint every 50 epochs
         val=True,
     )
