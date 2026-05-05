@@ -1,0 +1,1289 @@
+ 
+Contents lists available at ScienceDirect
+Computers in Biology and Medicine
+journal homepage: www.elsevier.com/locate/compbiomed  
+MANGA-YOLO: A Mamba-inspired YOLO model with group attention for 
+breast mass detection in mammograms
+Kien Trang a
+ , Fung Fung Ting a
+ ,∗, Bao Quoc Vuong b,c
+ , Chee-Ming Ting a
+a School of Information Technology, Monash University, Malaysia Campus, Subang Jaya, 47500, Malaysia
+b School of Electrical Engineering, International University, Ho Chi Minh City, 700000, Viet  Nam
+c Vietnam National University, Ho Chi Minh City, 700000, Viet  Nam
+A R T I C L E  I N F O
+Keywords:
+Mamba
+You Only Look One (YOLO)
+Breast mass detection
+Attention mechanism
+Contextual awareness
+ A B S T R A C T
+Breast cancer continues to be the primary cause of mortality from cancer in women globally, highlighting 
+the urgent necessity for early and accurate identification. Although mammogram is the gold standard for 
+screening, several challenges still exist, such as low contrast, varying sizes of masses, and irregular mass 
+shapes. To address these limitations, we propose MANGA-YOLO, a novel learning model for breast mass 
+detection inspired by the Mamba and transformer architecture. Our model integrates Mamba-Inspired Attention 
+with Contextual Awareness (MACA) to improve feature extraction by capturing long-range dependencies and 
+enhancing contextual understanding. Additionally, we introduce a Spatial and Channel Group Attention (SCGA) 
+module, which combines convolutional spatial refinement with group self-attention. This enriches feature 
+representation by strengthening boundary sensitivity and emphasizing global information through a series of 
+attention modules, thus improving the detection of masses with diverse sizes. These improvements enable more 
+precise detection of small, low-contrast, and irregularly shaped masses. The proposed approach is evaluated on 
+three mammography datasets – INbreast, VinDr-Mammo, and CBIS-DDSM – achieving 0.881, 0.69, and 0.664 
+for mAP50 metric, respectively. The results show the outperformance of our method over existing state-of-the-
+art models. It suggests that MANGA-YOLO offers a more robust and efficient approach to automated breast 
+mass detection, potentially improving early diagnosis and clinical decision making. The code is available at 
+https://github.com/Kien-Trang/MANGA-YOLO.
+1. Introduction
+Breast cancer is still a major health concern worldwide, which is 
+known as the most frequently diagnosed cancer and a leading cause of 
+cancer-related deaths among women. It is anticipated that 3.2 million 
+cases of breast cancer will be diagnosed, with annual deaths reaching 
+1.1 million by 2050 [1]. However, the distribution of breast cancer in-
+cidence and mortality are uneven across different regions. High-income 
+countries report that survival rates have improved due to advances 
+in screening and early detection in treatment. In contrast, low- and 
+middle-income nations are still faced with late-stage diagnoses and lack 
+of treatment access, which contributes to a high number of deaths [2]. 
+Thus, early detection and accurate diagnosis are essential for effective 
+treatment and improved survival rates. Furthermore, early identifica-
+tion facilitates access to a wider range of treatment options, which can 
+be less painful and targeted more precisely. This might substantially 
+mitigate the physical and emotional effects of breast cancer treatment 
+on patients.
+∗ Corresponding author.
+E-mail address: ting.fung@monash.edu (F.F. Ting).
+Medical imaging continues to be an important cornerstone in the 
+diagnosis and management of breast cancer. Various imaging modal-
+ities play a pivotal role in the detection of breast masses, including 
+Mammography, Ultrasound, Magnetic Resonance Imaging (MRI), etc. 
+However, in some cases, ultrasound and MRI are frequently employed 
+as supplementary tools, especially in the evaluation of dense breast 
+tissues and high-risk patient populations. Mammography remains the 
+gold-standard tool for the detection of breast cancer [3], which facil-
+itates the detection of tumors at an early stage. The use of screening 
+mammography has demonstrated a decline in fatalities by up to 63%, 
+as reported in [4]. Nevertheless, mammogram interpretation is often 
+challenging due to factors such as breast density, low contrast between 
+lesions and healthy tissue, etc.
+In the last few years, emerging technologies and methodologies 
+have enhanced breast cancer screening and diagnostic capabilities. The 
+integration of artificial intelligence into radiological assessments has 
+https://doi.org/10.1016/j.compbiomed.2025.111339
+Received 27 March 2025; Received in revised form 29 September 2025; Accepted 21 November 2025
+Computers in Biology and Medicine 199 (2025) 111339 
+Available online 26 November 2025 
+0010-4825/© 2025 The Authors. Published by Elsevier Ltd. This is an open access article under the CC BY-NC-ND license ( http://creativecommons.org/licenses/by- 
+nc-nd/4.0/ ). 
+K. Trang et al.
+shown promise in reducing diagnostic errors, especially in resource-
+constrained settings [5]. Convolutional Neural Networks (CNN) facil-
+itate the acquisition of distinctive information from various medical 
+images through neural network training, demonstrating robust gener-
+alization capabilities. Initially, Region-based CNN (R-CNN) series [6–8] 
+are introduced in object detection tasks with impressive performance. 
+Nevertheless, these conventional CNN-based methods might not be 
+efficient and optimal for medical object detection due to a lack of 
+end-to-end training. Moreover, the Real-Time Detection Transformer 
+(RT-DETR) [9] has recently emerged as an alternative in the domain of 
+object detection. By using an advanced feature extraction backbone and 
+a transformer-based design, RT-DETR demonstrates outstanding results 
+across numerous tasks. On the other hand, the You Only Look Once 
+(YOLO) model has emerged as a pivotal architecture, which is able to 
+process the entire image through a single detection process. Due to the 
+use of a single neural network model, the YOLO series models [10–12] 
+have high inference speed and low computing cost, achieving real-time 
+target detection. Another advantage is the ability to deal with objects 
+of different scales and sizes with multi-scale feature fusion.
+The architecture of YOLO typically consists of three parts: backbone, 
+neck, and head. The backbone network is crucial for extracting valuable 
+features from input images through the usage of CNNs, aiming to 
+capture hierarchical features at different scales. Meanwhile, the neck 
+part plays a key role in connecting the feature extraction stream from 
+the backbone block to optimize information flow and enhance feature 
+representation. At the end of the structure, the head part is treated 
+as the block containing prediction layers. Through versions of YOLO, 
+the models are more focused on improving the speed and accuracy 
+of general detection. Starting from YOLOv4 [13], more complex ar-
+chitectures like Spatial Pyramid Pooling (SPP) and Cross Stage Partial 
+(CSP) are employed to improve the performance, while YOLOv5 [14] 
+targets a lightweight network for faster speed with balanced accuracy. 
+Besides, the reparameterization model is introduced from YOLOv6 [15] 
+and coupled with the integration of an Efficient Layer Aggregation 
+Network (ELAN) in YOLOv7 [16]. From YOLOv8 onwards [17–20], the 
+decoupled structure is applied to separate classification and detection 
+heads, improving the accuracy and efficiency of target detection. Al-
+though recent advances in the YOLO series have significantly improved 
+performance in general object detection tasks, there are still some 
+limitations in working with medical image analysis. In particular, key 
+challenges in analyzing mammograms include low contrast of certain 
+medical structures, significant variability in mass size, and irregular 
+mass shapes caused by complex surrounding tissue structures. These 
+problems play an important role in the precise diagnosis of diseases.
+Recently, Mamba has been introduced as a novel high-performance 
+architecture [21], which has surpassed the transformer in some fields.
+[22,23]. This model integrates a selective operation in the space models 
+(SSM) with a hierarchical structure, allowing it to selectively process 
+relevant information in an input-dependent manner. This enables the 
+Mamba model to efficiently capture long-range dependencies. Thus, 
+applying Mamba in vision tasks might boost the understanding ability 
+of the model by working with long-distance spatial pixels.
+In this paper, we propose an enhanced YOLO-based model with 
+an application of breast mass detection. The proposed approach is 
+designed based on the YOLOv11 architecture, which capitalizes on 
+its architecture to extract more potential features from mammogram 
+images. This enhancement specifically aims to augment the capacity 
+of the original model for detecting the low-contrast and size vari-
+ation mass regions. To achieve this, we have extended the original 
+framework by integrating several innovative modules predominantly 
+within the backbone and head part of the architecture. Notably, these 
+modifications encompass the Mamba-inspired design with contextual 
+awareness alongside the incorporation of enhancing group attention 
+mechanism, thereby refining the detection capability of the model. This 
+improvement facilitates an optimal integration of both local features 
+and the surrounding context. These blocks improve the limitation of 
+capturing the long dependencies with attention mechanisms, which 
+might be neglected in the comparison of the traditional techniques.
+The main contributions of our work are summarized as follows:
+• We propose the Mamba-Inspired Attention with Contextual
+Awareness (MACA) module to boost the ability to deal with 
+additional latent features. This attention mechanism based on 
+a Mamba-inspired structure is strengthened by an enhanced ca-
+pacity for contextual understanding, which is integrated into 
+different stages of the backbone for enhancing the performance 
+of feature extraction. This contributes to the ability of detecting 
+masses with low contrast and irregular shapes.
+• We then construct a Spatial and Channel Group Attention (SCGA) 
+module, which is placed before the head part. By integrating 
+spatial and channel-based attention, the module not only utilizes 
+a group-wise transformer mechanism but also enhances attention 
+through convolutional operations, thus improving the detection 
+performance of masses across different sizes.
+• We introduce an improved architecture based on YOLO for breast 
+mass detection. To the best of our knowledge, our approach 
+is the first work, which introduces the Mamba-inspired design 
+with group attention for addressing several challenges in breast 
+mass detection. Specifically, the MACA module improves contex-
+tual understanding to detect low contrast and irregularly shaped 
+masses, while the SCGA module integrates group attention mech-
+anisms to improve detection of masses with varying sizes by 
+simultaneously refining spatial and channel-based attention. The 
+evaluations are conducted on three distinct breast mass datasets: 
+INbreast, CBIS-DDSM, and VinDr-Mammo. The results have note-
+worthy enhancements in performance compared to previous stud-
+ies and several recent detection models.
+2. Related work
+The advancement in deep learning has facilitated a significant 
+amount of research on the implementation of automated breast cancer 
+detection to assist in the diagnosis process. Early approaches mainly 
+focused on Region of Interest (ROI)-based classification. These methods 
+involved a preliminary cropping step to extract the ROI, followed 
+by classifying the extracted regions as either normal or containing 
+masses. The well-known pre-trained models that are usually used in 
+classification are ResNet [24], GoogleNet [25], AlexNet [26], etc. On 
+the other hand, the later studies focused more on end-to-end training 
+such as Faster Region-based Convolutional Neural Network (Faster-
+RCNN) [27], YOLO series [10]–[20], Single Shot MultiBox Detector 
+(SSD) [28]. These methods eliminate the need for pre-processing input 
+images into smaller patches, thereby streamlining the process and 
+improving efficiency.
+2.1. Region of interest-based classification
+A self-design deep convolutional neural network is applied in the 
+work [29] to classify the ROIs for breast mass. The framework in-
+corporates data pre-processing, augmentation, and transfer learning 
+techniques to enhance performance on the MIAS and private datasets. 
+The results demonstrate a test accuracy of 97% in distinguishing be-
+nign and malignant masses. In order to improve the performance, 
+the study [30] utilized the combined framework from different pre-
+trained models such as AlexNet and GoogleNet to classify the small 
+patches of the image. Thanks to the deep fusion features, the metrics 
+are improved when compared to the single model. K. B. Soulami 
+et al. [31] introduced the capsule network (CapsNet) to deal with the 
+patch-based breast mass classification. This newly proposed architec-
+ture deals with computational time issues, which usually occur in high 
+hierarchical structures. The model gives an AUC of 0.997 for binary 
+classification and 0.9 for multi-class scenarios, which outperforms the 
+Computers in Biology and Medicine 199 (2025) 111339 
+2 
+K. Trang et al.
+traditional CNN methods. Extending working on one type of imaging 
+technique, the authors in [32] proposed a framework to classify the 
+ROIs predefined by radiologists on both mammogram and ultrasound 
+images. In addition to employing data augmentation, the model mini-
+mizes tunable parameters while maintaining robust feature extraction 
+in imbalanced datasets. The results achieve impressive accuracies of 
+96.55% for the MIAS dataset and 100% for the BUS-1 dataset. While 
+ROI-based classification methods have shown success in mass region 
+classification, they rely heavily on pre-annotated regions and cannot 
+operate effectively in a fully automated detection pipeline. This leads to 
+typically lacking the ability to capture broader context, as they operate 
+on isolated patches rather than full images. Thus, these methods often 
+face difficulties in accurately identifying small or irregular masses due 
+to their dependency on predefined ROIs. This motivates a shift toward 
+end-to-end detection models.
+2.2. End-to-end detection
+A two-stage deep learning method based on Faster R-CNN and a 
+dedicated tumor classification model is proposed by [33] for work-
+ing with high-resolution mammograms. This method significantly en-
+hanced the Mean Average Precision at 50% Intersection over Union 
+(mAP50) score from 0.85 to 0.94 on their self-collected dataset, which 
+surpasses the Faster R-CNN and SSD. ERetinaNet [34] presents a spe-
+cialized detection framework tailored for mammographic mass detec-
+tion, which is built based on the RetinaNet architecture [35]. The 
+model introduces an Efficient Channel Attention (ECA) mechanism and 
+a modified feature pyramid network to increase the attention ability for 
+target region while maintaining computational efficiency. Besides, Vi-
+sion Transformer (ViT) is also integrated to enhance the global semantic 
+information. A. Baccouche et al. [36] focus on an end-to-end YOLOv3-
+based system for simultaneous detection and classification of breast 
+lesions. By employing a fusion model strategy, they achieved a bal-
+ance between precision and detection accuracy, significantly improving 
+performance across datasets. Their results demonstrated detection per-
+formance reaching 0.817 and 0.737 of mAP50 scores for INbreast and 
+CBIS-DDM datasets, respectively. Another later version is also explored 
+in the work [37] by utilizing YOLOv5x and YOLOv5s models for de-
+tecting breast masses in mammograms. The authors employed transfer 
+learning to improve model generalization and evaluated mainly their 
+approach on the VinDr-Mammo dataset, and the MIAS dataset is used 
+for external testing. The best results achieved with YOLOv5x is 0.602 
+mAP50 for the VinDr-Mammo dataset, while only 0.593 mAP50 is 
+reached by YOLOv5s. Similarly, F. Prinzi et al. [38] also explored 
+multiple YOLO architectures on their joint self-proprietary dataset. 
+The YOLOv3, YOLOv5, and YOLOv5-Transformer are integrated with 
+Eigen-CAM, which aims to reduce false negatives and provide out-
+put explanation. The evaluation shows the effectiveness of the YOLO 
+architecture in breast mass detection with 0.621 for mAP50, 0.726 
+for precision, and 0.591 for recall. The study [39] proposed a hy-
+brid YOLO and transformer-based model for simultaneous detection 
+and segmentation of breast masses in mammograms. This novel ap-
+proach combined YOLOv5L6 for high-resolution mass localization with 
+a Local–Global (LOGO) architecture to enhance capturing long-range 
+dependencies, which dramatically improves the performance at the 
+pixel level. Evaluated on CBIS-DDSM and INbreast datasets, YOLO-
+LOGO achieved a result of 0.65 and 0.6 for mAP50, respectively. 
+E. Mahoro et al. [40] introduced the use of YOLOv7 and YOLOv8 
+for detecting breast masses in mammograms. Their framework in-
+tegrates pre-processing techniques, such as contrast-limited adaptive 
+histogram equalization (CLAHE) and median filtering, to enhance im-
+age quality and reduce noise. The study utilizes the VinDr-Mammo 
+dataset and reports superior performance with YOLOv8, achieving a 
+mAP50 score of 0.65. N. F. Razali et al. [41] propose a novel en-
+hancement YOLO-based method to address the challenges of breast 
+mass detection in mammograms, particularly in dense breast tissues. 
+They introduced Spatial-based Breast Density Enhancement for Mass 
+Detection (SbBDEM), which optimizes the image pre-processing stage 
+by adjusting contrast and enhancing textural features to improve the 
+visibility of masses. By employing a modified YOLOv3 architecture, the 
+study achieves significant improvements, achieving 0.8125 for mAP50 
+score. Nevertheless, the existing studies tried to focus on increasing the 
+image quality to improve the performance of detecting breast mass. 
+They rely on general pre-processing methods rather than incorporating 
+specialized mechanisms or improving the internal representation learn-
+ing of models. These pre-processing methods are applied uniformly 
+across all images without leveraging semantic knowledge, and this may 
+lead to inadvertently enhancing noise or suppressing the details of 
+pathological patterns. Thus, our aim is to design explicitly modules 
+integrated inside the architecture for overcoming the drawbacks of the 
+previous studies in the case of breast mass detection.
+3. Materials and methods
+3.1. Datasets
+This study is mainly conducted on three distinct datasets to de-
+tect the breast mass cancer region based on mammograms. These 
+datasets provide diverse imaging views, annotation practices, and types 
+of breast density, which enables a comprehensive evaluation of the 
+proposed framework.
+The INbreast dataset [42] is one of the well-annotated and long-
+lasting datasets designed for research in breast cancer diagnosis and 
+mammographic imaging. It provides full-field digital mammograms 
+(FFDMs), which are collected in a clinical setting and annotated by 
+expert radiologists. The dataset includes 115 cases, comprising a total 
+of 410 mammogram images in the resolution of 3328 × 4084 or 
+2560 × 3328 pixels.
+The VinDr-Mammo [43] is known as one of the recent massive 
+datasets of breast cancer mammograms provided by the Institutional 
+Review Board of Hanoi Medical University Hospital and Hospital 108. 
+This dataset was ultimately collected in Vietnam, which also offers a 
+valuable reference specifically for Southeast Asian women. It consists 
+of approximately 20,000 images in the resolution of 2800 × 3518 pixels 
+covering various breast density levels.
+The Curated Breast Imaging Subset of Digital Database for Screening 
+Mammography (CBIS-DDSM) is proposed by R. S. Lee et al. [44]. The 
+dataset is built upon the original DDSM dataset, which is refined with 
+higher-quality scans and more precise annotations. It includes over 
+2500 mammographic cases with a mean of 3138 × 5220 pixels, each 
+Consisting of Craniocaudal (CC) and Mediolateral Oblique (MLO) views 
+with corresponding pathology diagnoses.
+3.2. Data pre-processing
+Since the Digital Imaging and Communications in Medicine (DI-
+COM) image type contains rich in metadata and high bit-depth pixel 
+information, which is often incompatible with deep learning frame-
+works. To allow the object detection model to directly interpret the 
+images, we converted the DICOM format into JPG format. This con-
+version also reduces the computational overhead and memory usage. 
+In order to fit into the model, the input images are then resized to 
+640 × 640 pixel with the 8 bit-depth per channel. For INbreast dataset, 
+107 malignant images with annotated mass ROIs are considered for 
+use in this study. Similarly, not all the images in VinDr-Mammo are 
+fully annotated in the mass region, only 1029 images with the full 
+label are employed for conducting experiments. Concentrating on mass 
+analysis, 1514 images from the CBIS-DDSM dataset are selected with 
+mass annotations.
+Computers in Biology and Medicine 199 (2025) 111339 
+3 
+K. Trang et al.
+Fig. 1. The proposed MANGA-YOLO for breast mass detection.
+Fig. 2. The structure of C2PSA, SPPF and Detect blocks.
+3.3. MANGA-YOLO architecture
+The primary framework of the proposed work is fundamentally 
+based on YOLOv11. Consequently, certain fundamental blocks are re-
+tained to ensure the benefits of YOLO-based architecture. The overview 
+of MANGA-YOLO model is depicted in Fig.  1, which illustrates the 
+components and processing pipeline for breast mass detection. Initially, 
+the model receives a 640 × 640 mammogram image as input and pro-
+cesses it through a series of convolutional layers and Mamba-Inspired 
+Attention with Contextual Awareness (MACA) modules, which enhance 
+feature extraction by capturing long-range dependencies and contextual 
+information. The ending part of the backbone adopts Spatial Pyramid 
+Pooling Fast (SPPF) and Cross-Stage Partial Spatial Attention (C2PSA) 
+modules to refine multi-scale features and improve spatial attention. 
+The extracted features are then passed through the upsampling and con-
+catenation operations to retain fine-grained details. Spatial and Channel 
+Group Attention (SCGA) modules are then integrated to enhance object 
+detection capabilities. The detection head consists of depth-wise and 
+standard convolutional layers, optimizing the bounding box regression 
+and classification loss functions for accurate mass localization.
+The primary framework of the proposed work is fundamentally 
+based on YOLOv11. Consequently, certain fundamental blocks includ-
+ing SPFF, C2PSA and Detect are retained to ensure the benefits of 
+YOLO-based architecture, which is shown in Fig.  2. SPFF module is 
+applied near the end of backbone, which aims to deal with various 
+sizes of objects. This is specifically designed to extract image features 
+at multiple scales, which enhances the capacity of models to recognize 
+objects across diverse spatial dimensions. The operation is achieved 
+through a series of max-pooling operations applied with varying kernel 
+sizes, which enables the module to capture and combine multi-scale 
+contextual information effectively. Furthermore, the Cross-Stage Partial 
+Spatial Attention (C2PSA) module is integrated as an ending block 
+of the backbone to enhance the attention mechanism. This module 
+is designed to emphasize spatial relationships within feature maps, 
+which enables the model to focus on the most critical regions of an 
+image. The internal structure consists of dual Partial Spatial Attention 
+(PSA) modules, each operating on separate branches to extract comple-
+mentary spatial features. This architectural design enables the model 
+to effectively prioritize spatial information while ensuring an optimal 
+trade-off between processing speed and accuracy. Finally, the Detection 
+part employs a decoupled head, which separates the bounding box 
+Computers in Biology and Medicine 199 (2025) 111339 
+4 
+K. Trang et al.
+Fig. 3. The structure of proposed MACA block.
+regression and class prediction into two independent branches. This 
+structure improves learning efficiency and reduces conflicts between 
+the two tasks. Besides, the detection head consists of several standard 
+convolutions and depth-wise convolutions, which refine the extracted 
+features from previous parts and enhance spatial and semantic repre-
+sentations. This design enhances the architecture, resulting in improved 
+accuracy and faster inference relative to earlier YOLO versions.
+3.4. Mamba-inspired attention with contextual awareness (MACA)
+In order to improve the feature extraction stage, we propose a 
+novel Mamba attention mechanism integrating contextual awareness, 
+as shown in Fig.  3. By extending the capabilities of Mamba-inspired 
+architectures [45], our approach refines attention mechanisms through 
+a strengthened capacity for contextual understanding. This enhance-
+ment enables the model to effectively capture spatial dependencies and 
+semantic relationships, leading to more robust feature extraction.
+Initially, Mamba [21] is the enhanced version of State Space Model 
+(SSM) with selective properties, which indicates the Selective State 
+Space Model (SSSM). The main improvement is based on introduc-
+ing input-dependent parameters. In order to make the model input-
+adaptive, the input gate ▵ and the input-dependent parameters 𝐵, 𝐶 are 
+treated as functions of the input 𝑥𝑖. The matrix 𝐴 is only worked as the 
+diagonal matrix, which is denoted as ̄𝐴𝑖. Then, the matrix containing 
+diagonal elements of ̄𝐴𝑖 is defined by ̃𝐴𝑖 = diag( ̄𝐴𝑖). Thus, the discrete 
+version of Mamba is defined through the hidden state ℎ𝑖 is described 
+by
+ℎ𝑖 = ̃𝐴𝑖 ⊙ ℎ𝑖−1 + 𝐵𝑖 (▵𝑖 ⊙𝑥𝑖 ), (1)
+𝑦𝑖 = 𝐶𝑖ℎ𝑖 + 𝐷 ⊙ 𝑥𝑖
+where ▵𝑖 is treated as the input gate to dynamically control input 𝑥𝑖
+contributions, the ⊙ operation is the Hadamard product (element-wise 
+multiplication), 𝐵𝑖 and 𝐶𝑖 are the input-dependent parameters. These 
+parameters can be formulated as follows 
+𝐵𝑖 = (𝑥𝑖𝑊𝐵)𝑇 , 𝐶𝑖 = 𝑥𝑖𝑊𝐶 , ▵𝑖= Softplus(𝑥𝑖𝑊1𝑊2) (2)
+where 𝑊𝐵, 𝑊𝐶 , 𝑊1 and 𝑊2 are learned projection matrices. In addition, 
+D is the learnable parameter, while the term of 𝐷 ⊙ 𝑥 𝑖 provides an 
+addition of the learnable path from the input 𝑥𝑖 to the output 𝑦𝑖. In 
+the case of processing image data, the adjustment for handling inputs 
+with multiple channels is considered, and each input can be treated as 
+2D array of pixel values with multiple channels.
+The input sequence 𝑥𝑖 ∈ R is modified to xi ∈ R𝑛×𝑐 , where 𝑛 is 
+sequence length in a series and 𝑐 is the number of input channels. The 
+hidden state h𝑖 ∈ R𝑑×𝑐 updated for each input token 𝑥𝑖 in a channel-
+wise manner, and the output yi computed all channels are defined 
+as
+h𝑖 = ̃𝑖 ⊙ h𝑖−1 + 𝑖(▵𝑖 ⊙x𝑖), (3)
+y𝑖 = 𝑖h𝑖 +  ⊙ x𝑖
+where ̃𝑖 ∈ R𝑑×𝑐 is channel-wise forget gate, 𝑖 ∈ R𝑑×1 is input-
+dependent parameter across all channels. x𝑖, ▵𝑖∈ R1×𝐶 are the input 
+sequence element and channel-wise input gate, respectively. Similarly, 
+𝑖 ∈ R1×𝑑 is channel-wise projection of the hidden state to the output 
+space, while  ∈ R1×𝐶 is learnable channel-wise shortcut.
+On the other hand, linear attention is introduced based on a modi-
+fied attention mechanism, which reduces the complexity of traditional 
+softmax-based attention mechanisms. This leverages linear complexity 
+with the integration of linear normalization and the kernel function 𝜙
+in query 𝑄 and key 𝐾. Thus, the new form of each element is defined 
+as 
+𝑄 = 𝜙 (𝑥𝑊𝑄
+), 𝐾 = 𝜙 (𝑥𝑊𝐾
+), 𝑉 = 𝑥𝑊𝑉 (4)
+where 𝑄, 𝐾, and 𝑉  are the query, key, and value projections of the 
+input. To achieve linear complexity, the attention computation is refor-
+mulated by reordering operations. Indeed, 𝑆𝑖 is introduced to accumu-
+late attention-weighted values, which is calculated by the summation 
+of the value vector 𝑉  and weighted by the transformed key 𝐾. Normal-
+ization factor 𝑍𝑖 is defined by the summation of the transformed key 
+𝐾. For the 𝑖th position in the sequence, the output of linear attention is 
+Computers in Biology and Medicine 199 (2025) 111339 
+5 
+K. Trang et al.
+described in  (5) with the key value product and normalization terms.
+𝛾𝑖 =
+𝑄𝑖
+(∑𝑖
+𝑗=1 𝐾 𝑇
+𝑗 𝑉𝑗
+)
+𝑄𝑖
+(∑𝑖
+𝑗=1 𝐾 𝑇
+𝑗
+) = 𝑄𝑖𝑆𝑖
+𝑄𝑖𝑍𝑖
+, 𝑆𝑖 =
+𝑖∑
+𝑗=1
+𝐾 𝑇
+𝑗 𝑉𝑗 , (5)
+𝑍𝑖 =
+𝑖∑
+𝑗=1
+𝐾 𝑇
+𝑗
+Then, the linear attention in recurrent form is formulated in  (6).
+𝑆𝑖 = 𝑆𝑖−1 + 𝐾 𝑇
+𝑖 𝑉𝑖, 𝑍𝑖 = 𝑍𝑖−1 + 𝐾 𝑇
+𝑖 , (6)
+𝛾 = 𝑄𝑖𝑆𝑖∕𝑄𝑖𝑍𝑖
+To achieve the relevance between Mamba and linear transformer, we 
+try to reformulate  (6) for fitting the required terms in  (3). The 
+modified formulation is adjusted as follows:
+𝑆𝑖 = 1 ⊙ 𝑆𝑖−1 + 𝐾 𝑇
+𝑖
+(1 ⊙ 𝑉𝑖
+), (7)
+𝛾 = 𝑄𝑖𝑆𝑖∕𝑄𝑖𝑍𝑖 + 0 ⊙ 𝑥𝑖
+It can be seen that Eqs.  (3) and (7) have a close relationship, which 
+indicates that Mamba can be treated as a special variance of linear 
+transformer. The hidden state ℎ𝑖 in Mamba and 𝑆𝑖 in linear transformer 
+are updated by combining the previous states and the current input, 
+while the output 𝛾 of linear attention eliminates the shortcut connection 
+directly from the input 𝑥. To address this, an additional skip connection 
+is integrated along with linear attention to aggregate more information 
+and emulate the Mamba model more effectively.
+Further refinement is achieved by implementing a normalization 
+layer and a Multilayer Perceptron (MLP). This process is crucial for 
+scaling the feature map to the desired dimensions, allowing for more 
+effective feature aggregation in the final step, as defined as 
+Mamba = 𝛾 + MLP (Norm (𝛾)) (8)
+where Norm is the layer normalization applied per-element scale, 
+and MLP represents the MLP operation. Mamba is denoted as the 
+Mamba-attention features after this stage.
+In the second path of the MACA block, we implemented contex-
+tual awareness ability to understand and provide the supplementary 
+potential features for the Mamba-inspired attention. Initially, the local 
+features and surrounding context features are extracted via the standard 
+of 3 × 3 convolution with the neighborhood pixels and 3 × 3 dilated 
+convolution with a large receptive field. The combination of fused 
+features is carried out with the support of the Batch Normalization (BN) 
+and the Parametric Rectified Linear Unit (PReLU) activation function, 
+as described by 
+fused = PReLU(BN(conv + Dconv)) (9)
+where conv and Dconv represent the output of convolution and dilated 
+convolution, respectively. The symbol + indicates the concatenation 
+operation. Furthermore, the larger context is then extracted by global 
+average pooling (GAP) and MLP, which enhance the ability to un-
+derstand the general context from the inputs. The context feature 
+is computed by the element-wise multiplication between the global 
+features global and the fused features fuse as shown in  (10) and (11), 
+respectively:
+global = MLP(avg(fused)) (10)
+context = fused ⊙ global (11)
+where avg and MLP are the operation of GAP and MLP, respectively. 
+Finally, the features from context awareness and Mamba-inspired atten-
+tion are joined to form the enhanced feature map, which is formulated 
+as 
+MACA = Mamba ⊕ context ⊕ x (12)
+where MACA is the final result after aggregation, the ⊕ operation 
+represents the element-wise addition. The use of MACA blocks en-
+hances the capability to deal with complex scenes by providing a 
+contextual understanding with Mamba-inspired attention, which might 
+aid in distinguishing target objects in some challenging scenarios.
+3.5. Spatial chanel group attention (SCGA)
+To enhance the ability of the attention mechanism, we developed 
+a hybrid type with a combination of convolutional layers and trans-
+formers, which is illustrated in Fig.  4. Inspired by the traditional 
+attention mechanism [46], the network excels at low-level feature 
+extraction through convolutional filters. On the other hand, the trans-
+former is able to capture long-range dependencies efficiently through 
+self-attention. Thus, the redesigned spatial and channel attention is 
+incorporated with the group attention transformer, which aims to 
+balance the understanding of global context and local relationships.
+Initially, the input features map is defined as 𝑋 ∈ R𝐶×𝐻×𝑊 , where 
+𝐶 and 𝐻 ×𝑊  represent the number of channels and spatial dimensions, 
+respectively. In the first stage, semantic information is extracted by 
+focusing on the most informative features. The aggregation of channel 
+information is processed across all locations using GAP, defined as 
+avg = 1
+𝐻 × 𝑊
+𝐻∑
+𝑖=1
+𝑊∑
+𝑗=1
+𝑋(𝑖, 𝑗) (13)
+where avg is the output of GAP and considered as descriptor. To 
+generate a channel attention map, this descriptor is then fed into a MLP 
+network and followed by an activation function as in  (14), which is 
+then applied to emphasize specific channels. 
+channel = 𝜎(MLP(avg)) (14)
+where 𝑐ℎ𝑎𝑛𝑛𝑒𝑙 is the channel attention map. MLP and 𝜎 are the opera-
+tion of MLP and sigmoid function, respectively. The enhanced feature 
+map enhance for further steps is defined by applying the original feature 
+map through element-wise multiplication as follows: 
+enhance = channel ⊙ 𝑋 (15)
+After refining the feature map in the channel manner, the spatial 
+attention is subsequently applied to enhance the features in the spatial 
+aspect. In this phase, the additional global max pooling (GMP) is em-
+ployed and concatenated with the GAP to produce a balance between 
+the global context and salient features. This output is set as max-avg
+descriptor and is formulated by
+max-avg =
+[
+𝐻
+max
+𝑖=1
+𝑊
+max
+𝑗=1
+enhance(𝑖, 𝑗)
+]
+⊕ …
+…
+[
+1
+𝐻×𝑊
+𝐻∑
+𝑖=1
+𝑊∑
+𝑗=1
+enhance(𝑖, 𝑗)
+]
+(16)
+Similarly to the previous part, the concatenated descriptor is then 
+passed through a convolution layer and sigmoid activation function. 
+This aims to capture larger spatial context, which might determine 
+potential regions effectively. Thus, the spatial attention map is defined 
+in  (17), while the overall attention map is obtained by concatenation 
+between the enhanced feature map and the spatial attention map as:
+spatial = 𝜎(conv(max-avg)) (17)
+̂𝑋 = spatial ⊙ enhance (18)
+where ̂𝑋 is the improved attention feature map in both channel and 
+spatial attention. Afterwards, the feature map is continually processed 
+in the transformer aspect. The 𝑄, 𝐾, and 𝑉  matrices are the linear 
+transformations of ̂𝑋 as follows: 
+𝑄 = ̂𝑋𝑊𝑄, 𝐾 = ̂𝑋𝑊𝐾 , 𝑉 = ̂𝑋𝑊𝑉 , (19)
+where 𝑊𝑄, 𝑊𝐾 , 𝑊𝑉 ∈ R𝑑×𝑑𝑘 are learnable weight matrices, and 
+𝑑𝑘 is the dimensionality of the query and key vectors. In order to 
+Computers in Biology and Medicine 199 (2025) 111339 
+6 
+K. Trang et al.
+Fig. 4. The structure of proposed SCGA block.
+aggregate more transformers, given that ̂𝑋 represents the input features 
+to the group attention module, the feature map is divided into ℎ
+groups corresponding to each attention head. Thus, the feature subset 
+assigned to the 𝑖th head is defined by ̂𝑋𝑖, and 𝑛 is the total number of 
+attention heads. For the 𝑖th head, self-attention ̃𝑋𝑖 is applied to each 
+corresponding input feature ̂𝑋𝑖, which is defined by
+Attention(𝑄𝑖, 𝐾𝑖, 𝑉𝑖) = Softmax
+(
+𝑄𝑖𝐾 𝑇
+𝑖
+√
+𝑑𝑘
+)
+𝑉𝑖, (20)
+̃𝑋𝑖 = Attention(𝑄𝑖, 𝐾𝑖, 𝑉𝑖) (21)
+To improve the feature refinement, the output of each head is added 
+into the next head as the supplementary input. For the 𝑖th head (𝑖 > 1), 
+the aggregated feature operation is described as 
+𝑋′
+𝑖 = ̂𝑋𝑖 + ̃𝑋𝑖−1 (22)
+where 𝑋′
+𝑖 is the refined input to the 𝑖th head, ̃𝑋𝑖−1 is the output of 
+the previous head. In the case of first head (𝑖 = 1 ), no cascading 
+operation is performed 𝑋′
+1 = ̂𝑋1. This mechanism allows each head 
+to refine the features progressively, increasing the depth of network 
+without adding significant computational overhead. After processing 
+all 𝑛 heads, their outputs are concatenated and projected back to match 
+the input dimensionality as shown in  (23), while the final result of the 
+SCGA block SCGA is enhanced by applying element-wise multiplication 
+with the previous stage results, as defined in  (24).
+ = Concatenate[ ̃𝑋𝑖]𝑛
+𝑖=1𝑊 𝑃 (23)
+SCGA =  ⊙ ̂𝑋 (24)
+where 𝑊 𝑃 is a learnable projection matrix, and  is the result of group 
+attention. Overall, the fusion of attention types allows the model to 
+leverage the strengths of both architectures, which might efficiently 
+process both fine-grained details and long-range dependencies.
+3.6. Bounding box optimization
+In the YOLO-based model, optimizing the loss function and applying 
+Non-Maximum Suppression (NMS) are essential for achieving robust 
+and accurate object detection. This process is used to ensure that the 
+model predicts bounding box coordinates and classifies detected objects 
+accurately. However, despite these optimizations, models often produce 
+several overlapping bounding boxes for the same object due to the 
+nature of anchor boxes and grid-based detection. NMS is mentioned as 
+a post-processing step to eliminate redundant detections by selecting 
+the bounding box with the highest confidence score and suppressing 
+others with a high Intersection over Union (IoU).
+Although this NMS-based implementation is effective in improving 
+the final result, standard IoU does not account for the spatial relation-
+ship between object boxes and the anchor boxes. Thus, DIoU [47] is 
+proposed to overcome the drawbacks while keeping the advantages 
+of the original IoU. Besides considering the distance between boxes, 
+DIoU can effectively handle cases where two bounding boxes overlap. 
+However, it remains limited in scenarios where the center points of the 
+two boxes overlap, which brings the limitation in optimization. Thus, 
+the aspect ratio of the box is considered as a promised direction to over-
+come this problem. Several IoU variants such as SIoU [48], EIoU [49], 
+and CIoU [50] have been proposed to further improve bounding box 
+regression performance. SIoU introduces an incorporation of angle cost 
+and scale adaptation to enhance multiple objects detection with varying 
+orientations and scales. This might increase the computational expense 
+during training and does not always provide a substantial performance 
+gain due to adding more terms in loss function. In addition, EIoU also 
+proposed by processing width and height differences separately, which 
+aims to improve bounding box regression. However, by individually 
+penalizing width and height might struggle to provide the same level 
+of precision, making it less effective for small object detection tasks. 
+While SIoU and EIoU offer improvements in the optimization process, 
+their applicability might exceed the needs in scenarios involving mass 
+detection within a single class, especially when detecting objects of very 
+small size.
+On the other hand, CIoU reduces localization errors, particularly for 
+extended or irregularly shaped objects, by considering the normalized 
+distance between the anticipated and ground truth bounding boxes, and 
+therefore, preserving shape consistency. The loss function of CIoU is 
+directly improved from the DIoU, which is described in (25). 
+CIoU = 1 − 𝐼𝑜𝑈 +
+𝜌2 (𝑏, 𝑏𝑔
+)
+𝑐2 + 𝛼𝑣 (25)
+where 𝜌(∙) = ‖ 𝑏 − 𝑏𝑔‖ 2 denotes as the Euclidean distance between 
+center of predicted box 𝑏 and center of ground truth box 𝑏𝑔; 𝑐 and 𝛼
+Computers in Biology and Medicine 199 (2025) 111339 
+7 
+K. Trang et al.
+is diagonal length of two boxes and the weight function, respectively. 
+𝑣 is employed to measure the consistency aspect ratio. The formulas for 
+defining 𝑣 and 𝛼 are shown in the (26) and (27).
+𝑣 = 4
+𝜋2
+(
+arctan
+(𝑤𝑔
+ℎ𝑔
+)
+− arctan
+(𝑤
+ℎ
+))2
+(26)
+𝛼 = 𝑣
+(1 − 𝐼𝑜𝑈 ) + 𝑣 (27)
+where 𝑤, ℎ are the width and height of the predicted bounding box; 
+𝑤𝑔, ℎ𝑔 are the width and height of the ground truth box. Compared with 
+SIoU and EIoU, CIoU brings the sufficient applicability, which balances 
+the complexity and the capability to handle small objects. Thus, CIoU 
+is considered for applying in the training process.
+4. Experiments
+4.1. Implementation details
+Regarding the evaluation, all experiments are run on the computer 
+with the CPU Intel core i7-12700 and an RTX 3090 GPU including 
+24Gb memory. The operating system is Ubuntu 20.04 LTS, while the 
+development framework is Pytorch 2.0 and CUDA 11.7. In this study, 
+we employed a random image-level partitioning strategy, where 80% 
+of the images were used for training, and 20% for testing. Importantly, 
+our model is specifically designed as a single-image-based detection 
+framework, which does not rely on multi-view fusion or contextual 
+information from paired craniocaudal (CC) and mediolateral oblique 
+(MLO) views from the same patient. Therefore, each image is treated 
+as an independent sample during both training and inference. The 
+resolution of the images in the datasets is resized to 640 × 640, while 
+the batch size is set to 32 with the training processed in 300 epochs. 
+The training optimizer is conducted by AdamW, starting with a learning 
+rate of 0.01.
+4.2. Evaluation metrics
+To comprehensively assess the advantages and limitations of the 
+proposed framework, a number of evaluation metrics are used to pro-
+vide a balanced measure of both localization accuracy and detection 
+robustness across varying levels of overlap thresholds. Specifically, the 
+selected performance metrics include Mean Average Precision at 50% 
+Intersection over Union (mAP50), Mean Average Precision across a 
+range of Intersection over Union thresholds (IoU) from 50% to 95% 
+(mAP50-95), precision, and recall. Among these, mAP50 and mAP50-
+95 serve as the primary benchmarks for comparative analysis against 
+state-of-the-art models and ablation studies.
+Eq.  (28) describes the precision metric, which is defined by the 
+proportion of correctly predicted objects among all detected objects. 
+Precision = 𝑇 𝑃
+𝑇 𝑃 + 𝐹 𝑃 (28)
+where TP are the correct objects that match a ground-truth object, 
+FP are incorrectly detected objects. Recall measures the proportion of 
+actual ground-truth objects that are successfully detected by the model, 
+as shown in (29). 
+Recall = 𝑇 𝑃
+𝑇 𝑃 + 𝐹 𝑁 (29)
+where FN are the objects that the model cannot detect. In addition, 
+mAP50 denotes the mean average precision computed at a fixed IoU 
+threshold of 50%. Detections are considered accurate if the Intersection 
+over Union (IOU) is 50% or greater, as described in (30). 
+mAP50 = 1
+𝑁
+𝑁∑
+𝑐=1
+𝐴𝑃 𝐼𝑜𝑈 =0.5
+𝑐 (30)
+where 𝐴𝑃 𝐼𝑜𝑈 =0.5
+𝑐  is the average precision of object class 𝑐 at 𝐼𝑜𝑈 = 50%, 
+and 𝑁 is the total number of object class. Besides, mAP50-95 extends 
+the evaluation across multiple IoU thresholds, which is considered as 
+a more comprehensive measure of model performance. This metric is 
+defined as the mean AP obtained at multiple IoU thresholds ranging 
+from 50% to 95%, as follows: 
+mAP50−95 = 1
+10
+0.95∑
+𝑡=0.5
+(
+1
+𝑁
+𝑁∑
+𝑐=1
+𝐴𝑃 𝐼𝑜𝑈 =𝑡
+𝑐
+)
+(31)
+where 𝑡 denotes the IoU thresholds from 0.50 to 0.95 with an increment 
+of 0.05, and 𝐴𝑃 𝐼𝑜𝑈 =𝑡
+𝑐  is the average precision of object class 𝑐 at each 
+IoU threshold 𝑡.
+4.3. Quantitative results
+The performance comparison presented in Table  1 highlights the 
+effectiveness of the proposed MANGA-YOLO model against the latest 
+object detection architectures, including YOLOv9, YOLOv10, YOLOv11, 
+and RT-DETR, across three benchmark datasets: INbreast,
+VinDr-Mammo, and CBIS-DDSM. Our model achieves the highest recall, 
+mAP50 and mAP50-95, for the INbreast and VinDr-Mamo datasets. 
+For the CBIS-DDSM dataset, our model still maintains its robustness, 
+outperforming competing models in mAP50 for 0.664 and mAP50-
+95 for 0.274, highlighting its adaptability across different datasets. 
+In addition, we conducted cross-dataset experiments, where models 
+were trained on one dataset and tested on the remaining two, as 
+shown in Table  2. Across these settings, MANGA-YOLO still achieves 
+higher precision and mAP than others, with particularly strong results 
+when trained on CBIS-DDSM and tested on INbreast and VinDr-Mammo 
+dataset — reaching mAP50 of 0.625 and mAP50-95 of 0.263. These 
+results demonstrate that the proposed modules generalize beyond 
+dataset-specific biases. Table  3 shows the performance comparison of 
+the proposed model and the previous studies. For the INbreast dataset, 
+MANGA-YOLO achieves 0.881 for mAP50 and 0.566 for mAP50-95, 
+surpassing the previous best - 0.8125 for mAP50. Similarly, for VinDr-
+Mammo, our model attains the mAP50 of 0.69, outperforming the 
+approach of E. Mahoro et al. [40]. In CBIS-DDSM, the proposed model 
+remains competitive with a mAP50 of 0.664.
+To evaluate the feasibility of our model, a comparative analy-
+sis of inference time, model parameters, and FLOPs is performed, as 
+described in Table  4. Although MANGA-YOLO introduces two addi-
+tional modules, the overall architectural design remains lightweight, 
+with only 2.94 million parameters and 8.3 GFLOPs. These values 
+are only slightly higher than YOLOv10 and YOLOv11. Notably, our 
+model achieves an inference time of 1.2 ms per image, which is well 
+within the threshold for real-time deployment. The results confirm 
+that MANGA-YOLO balances accuracy with practical speed, making 
+it highly suitable for integration into time-sensitive practical applica-
+tions. Furthermore, we conducted a Free-Response Receiver Operating 
+Characteristic (FROC) analysis, as shown in Fig.  5. This curve plots 
+sensitivity against the number of false positives per image (FPPI), which 
+provides more diagnostic-specific evaluation than traditional metrics. 
+It is clear that MANGA-YOLO consistently outperforms all baseline 
+models across the FPPI range of 0 to 0.35. Notably, at FPPI = 0.15, 
+MANGA-YOLO achieves a sensitivity of approximately 0.6, while others 
+achieve lower values. These results demonstrate that MANGA-YOLO 
+achieves not only high performance in detection but also offers a more 
+suitable trade-off between sensitivity and false positives.
+4.4. Qualitative results
+To comprehensively assess the advantages and limitations of our 
+framework, the illustration detection of the MANGA-YOLO and other 
+recent models in different datasets is shown in Fig.  6. Overall, RT-DETR 
+and earlier versions of YOLO models exhibit limitations in detecting 
+small masses, which often fail to provide complete bounding boxes or 
+entirely missing regions with low contrast. On the other hand, MANGA-
+YOLO demonstrates superior performance in some of these challenging 
+Computers in Biology and Medicine 199 (2025) 111339 
+8 
+K. Trang et al.
+Table 1
+Comparison of different models for breast mass detection on INbreast, VinDr-Mammo and CBIS-DDSM.
+ Model INbreast VinDr-Mammo CBIS-DDSM
+ Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 
+ RT-DETR [9] 0.889 0.625 0.792 0.482 0.754 0.641 0.635 0.299 0.705 0.635 0.659 0.256  
+ YOLOv9 [18] 0.939 0.750 0.838 0.509 0.683 0.655 0.677 0.340 0.747 0.548 0.636 0.256  
+ YOLOv10 [19] 0.724 0.764 0.773 0.546 0.657 0.553 0.608 0.303 0.669 0.564 0.610 0.253  
+ YOLOv11 [20] 0.944 0.704 0.782 0.541 0.666 0.591 0.651 0.346 0.786 0.551 0.630 0.266  
+ RetinaNet [35] 0.528 0.792 0.742 0.313 0.583 0.646 0.540 0.214 0.681 0.635 0.543 0.190  
+ MANGA-YOLO (ours) 0.918 0.792 0.881 0.566 0.687 0.702 0.690 0.340 0.694 0.619 0.664 0.274  
+Note: The best values are highlighted in bold.
+Table 2
+Comparison of different models on cross-dataset breast mass detection across INbreast, VinDr-Mammo and CBIS-DDSM.
+ Model Trained by INbreast, tested on
+VinDr-Mammo and CBIS-DDSM
+Trained by VinDr-Mammo, tested
+on INbreast and CBIS-DDSM
+Trained by CBIS-DDSM, tested
+on INbreast and VinDr-Mammo
+ Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95  
+ RT-DETR [9] 0.574 0.360 0.355 0.089 0.609 0.498 0.451 0.155 0.783 0.515 0.579 0.238  
+ YOLOv9 [18] 0.644 0.320 0.341 0.086 0.570 0.588 0.553 0.182 0.655 0.517 0.560 0.250  
+ YOLOv10 [19] 0.504 0.360 0.325 0.092 0.587 0.526 0.505 0.179 0.576 0.457 0.503 0.221  
+ YOLOv11 [20] 0.379 0.400 0.314 0.079 0.547 0.509 0.503 0.184 0.618 0.480 0.533 0.228  
+ RetinaNet [35] 0.467 0.280 0.224 0.065 0.615 0.635 0.492 0.146 0.776 0.368 0.322 0.106  
+ MANGA-YOLO (ours) 0.880 0.360 0.369 0.070 0.537 0.566 0.555 0.186 0.626 0.544 0.625 0.263  
+Note: The best values are highlighted in bold.
+Table 3
+Comparison of different studies in breast cancer detection datasets.
+ Author Method Dataset Precision Recall mAP50 mAP50-95 
+ A. Baccouche et al. [36] YOLO-V3 with fusion models CBIS-DDSM – – 0.637 –  
+ INbreast – – 0.752 –  
+ A.E. Quiñones-Espín et al. [37] Yolov5s model VinDr-Mammo – 0.78 0.593 –  
+ Yolov5x model VinDr-Mammo – 0.80 0.602 –  
+ Y. Su [39] YoloV5L6 CBIS-DDSM – – 0.65 –  
+ INbreast – – 0.6 –  
+ E. Mahoro et. al [40] YoloV8 with Median filter VinDr-Mammo – – 0.65 0.35  
+ N.F. Razali et al. [41] YoloV3 with SbBDEM INbreast – – 0.813 –  
+ Our proposed MANGA-YOLO INbreast 0.918 0.792 0.881 0.566  
+ VinDr-Mammo 0.687 0.702 0.690 0.340  
+ CBIS-DDSM 0.694 0.619 0.664 0.274  
+Note: The best values are highlighted in bold. The empty values are denoted as ‘‘–’’, which were not reported in the original cited studies.
+Table 4
+Comparison of Model Complexity and Inference Efficiency.
+ Model Parameters FLOPs Inference time 
+ (M) (G) (ms/img)  
+ RT-DETR [9] 8.22 15.4 1.5  
+ YOLOv9 [18] 1.97 7.6 0.9  
+ YOLOv10 [19] 2.69 8.2 0.8  
+ YOLOv11 [20] 2.58 6.3 0.7  
+ RetinaNet [35] 19.77 61.45 9.89  
+ MANGA-YOLO (ours) 2.94 8.3 1.2  
+cases by leveraging improved feature extraction and enhanced atten-
+tion ability to enable better differentiation of small or low contrast 
+masses from the surrounding tissue. Fig.  7 illustrates typical error cases 
+of MANGA-YOLO. Extremely small or low-contrast lesions (Cases 1 and 
+3) were often missed, while the case of size mismatches (Case 2) oc-
+curred due to the ambiguous boundary of the mass. Besides, predictions 
+overlapped or fragmented across regions instead of producing a single 
+precise box (Cases 4 and 5). These examples highlight challenges in 
+boundary localization and clustered lesions, suggesting the need for 
+improved contextual features and box fusion strategies in future work.
+Fig. 5. Comparison of FROC curves of different models.
+Computers in Biology and Medicine 199 (2025) 111339 
+9 
+K. Trang et al.
+Fig. 6. Qualitative comparison of different instance detection models on INBreast, VinDr-Mammo, CBIS-DDSM datasets.
+Fig. 7. Representative error cases of MANGA-YOLO.
+Computers in Biology and Medicine 199 (2025) 111339 
+10 
+K. Trang et al.
+Table 5
+Effect of different proposed approaches on detection performance.
+ The proposed approaches Inbreast VinDr-Mammo CBIS-DDSM
+ MACA SCGA Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 
+ Small Medium Large  
+ ✓ – – – 0.944 0.708 0.843 0.559 0.734 0.643 0.676 0.335 0.759 0.573 0.655 0.262  
+ ✓ ✓ – – 0.764 0.810 0.824 0.541 0.701 0.578 0.659 0.335 0.732 0.604 0.645 0.268  
+ ✓ – ✓ – 0.921 0.708 0.839 0.593 0.668 0.616 0.630 0.339 0.741 0.573 0.659 0.271  
+ ✓ – – ✓ 0.899 0.750 0.847 0.549 0.717 0.617 0.668 0.350 0.707 0.604 0.651 0.264  
+ ✓ ✓ ✓ – 0.829 0.833 0.871 0.588 0.671 0.602 0.646 0.339 0.712 0.573 0.636 0.296  
+ ✓ – ✓ ✓ 0.929 0.708 0.838 0.542 0.707 0.592 0.644 0.343 0.715 0.616 0.663 0.272  
+ ✓ ✓ – ✓ 0.833 0.830 0.849 0.559 0.735 0.612 0.679 0.353 0.662 0.594 0.623 0.263  
+ ✓ ✓ ✓ ✓ 0.918 0.792 0.881 0.566 0.687 0.702 0.690 0.340 0.694 0.619 0.664 0.274  
+Note: The best values are highlighted in bold. ‘‘✓’’ denotes that the module is included in the model configuration, while ‘‘–’’ indicates that the module is not utilized in the 
+corresponding configuration.
+Table 6
+Effect of different feature extraction methods on detection performance.
+ Method INbreast VinDr-Mammo CBIS-DDSM
+ Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 
+ AFF [51] 0.949 0.778 0.867 0.587 0.713 0.587 0.636 0.325 0.788 0.551 0.644 0.267  
+ MAN [52] 0.833 0.833 0.876 0.575 0.756 0.558 0.683 0.336 0.661 0.548 0.625 0.266  
+ RepVGG [53] 0.904 0.784 0.833 0.527 0.782 0.559 0.668 0.327 0.707 0.594 0.652 0.274  
+ MA only (ours) 0.926 0.750 0.832 0.564 0.759 0.613 0.663 0.325 0.772 0.597 0.655 0.268  
+ CA only (ours) 0.960 0.708 0.837 0.588 0.713 0.660 0.690 0.336 0.735 0.560 0.646 0.266  
+ MACA (ours) 0.918 0.792 0.881 0.566 0.687 0.702 0.690 0.340 0.694 0.619 0.664 0.274  
+Note: The best values are highlighted in bold.
+4.5. Ablation studies
+4.5.1. Effect of proposed approaches
+In order to evaluate the contribution of the proposed approach, 
+Table  5 presents the effectiveness of integrating each architectural 
+component and its placement within the model. The results justify the 
+strategic positioning of these components based on their detection per-
+formance. Initially, the inclusion of MACA alone demonstrates notable 
+improvements across most evaluation metrics compared to the base-
+line YOLOv11 model. Besides, the performance continues to improve 
+with the integration of SCGA, which is incorporated before different 
+detection blocks to effectively handle objects of varying sizes. Overall, 
+the combination of MACA and SCGA at all three mentioned locations 
+gives the most balanced performance across all metrics. Therefore, this 
+implementation has been chosen as the primary architecture for the 
+proposed model.
+4.5.2. Effect of feature extraction backbone
+The performance comparison of other feature extraction blocks 
+and the proposed MACA is demonstrated in Table  6. Attentional Fea-
+ture Fusion (AFF) [51], Multi-scale Attention Network (MAN) [52], 
+RepVGG [53] are employed to replace the feature extraction blocks 
+in the main architecture. Indeed, the MACA consistently outperforms 
+other feature extractors, which achieves the best balance between 
+all key metrics. It gives the highest recall and mAP50 on the IN-
+breast dataset, and continues to reach top performance in three out of 
+four metrics on both the VinDr-Mamo and CBIS-DDSM datasets. This 
+superior performance is attributed to the joint effect of two subcom-
+ponents within MACA: the Mamba-inspired Attention (MA) path and 
+the Contextual Awareness (CA) path. The MA path aims to improve 
+long-range feature modeling, while the CA path enhances fine-grained 
+spatial localization. Thus, these components contribute complemen-
+tary strengths that enhance the effectiveness of MACA in capturing 
+fine-grained details in low contrast regions and reducing the risk of 
+overlooking detections.
+4.5.3. Effect of attention mechanism
+In comparison to Triplet Attention (TA) [54], Squeeze-and-
+Excitation Block (SE) [55], Coordinate Attention (CA) [56], the pro-
+posed SCGA demonstrates better results in almost all metrics, as il-
+lustrated in Table  7. SCGA surpasses current attention mechanisms in 
+mAP50 and mAP50-95, indicating improved mass localization. This 
+enhancement is attributed to its refined attention mechanism, which 
+allows for better detection of objects with varying sizes and shapes. As 
+a result, our proposed model is able to detect even small-sized masses, 
+contributing to a direct improvement in the overall detection result.
+4.5.4. Effect of bounding box optimization
+The primary objective of this optimization is to improve the bound-
+ing box regression for object detection tasks. Various versions of IoU 
+have been proposed as improvements over the traditional method. In 
+this work, DIoU [47], SIoU [48], EIoU [49] and CIoU [50] are evaluated 
+to determine the most effective method for enhancing localization 
+accuracy, as presented in Table  8. This suggests that CIoU reached the 
+optimal result with almost reaching the highest metrics compared to 
+the others. Thus, CIoU is confirmed as the optimization selection for 
+integrating into our proposed model, which ensures better detection 
+accuracy and robustness.
+5. Conclusion
+We developed MANGA-YOLO, a novel YOLO-based architecture 
+to improve breast mass detection in mammograms. By incorporating 
+MACA and SCGA modules, the model refines feature extraction and 
+strengthens attention mechanisms, leading to better detection per-
+formance. The results of INbreast, VinDr-Mammo, and CBIS-DDSM 
+datasets demonstrate superior performance in various metrics com-
+pared to state-of-the-art models. The integration of MACA enables 
+the model to capture long-range dependencies and contextual under-
+standing, while SCGA enhances multiple attention in different aspects 
+to improve object detection with various sizes. Moreover, the use of 
+CIoU for bounding box optimization further improves the training 
+performance, ensuring robustness across diverse cases. Ablation studies 
+confirm that each proposed module significantly contributes in im-
+proving performance, which highlights the effectiveness of the overall 
+Computers in Biology and Medicine 199 (2025) 111339 
+11 
+K. Trang et al.
+Table 7
+Effect of different attention mechanisms.
+ Method INbreast VinDr-Mammo CBIS-DDSM
+ Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 
+ TA [54] 0.860 0.766 0.828 0.561 0.696 0.601 0.636 0.319 0.702 0.607 0.652 0.269  
+ SE [55] 0.904 0.788 0.833 0.532 0.714 0.582 0.657 0.336 0.706 0.585 0.651 0.267  
+ CA [56] 0.865 0.802 0.874 0.546 0.700 0.650 0.662 0.332 0.707 0.597 0.648 0.268  
+ SCGA (ours) 0.918 0.792 0.881 0.566 0.687 0.702 0.690 0.340 0.694 0.619 0.664 0.274  
+Note: The best values are highlighted in bold.
+Table 8
+Effect of different bounding box optimization methods.
+ Method INbreast VinDr-Mammo CBIS-DDSM
+ Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 Precision Recall mAP50 mAP50-95 
+ DIoU [47] 1.000 0.662 0.813 0.506 0.715 0.549 0.648 0.346 0.720 0.542 0.635 0.267  
+ SIoU [48] 0.849 0.704 0.840 0.573 0.704 0.602 0.655 0.334 0.695 0.599 0.644 0.271  
+ EIoU [49] 0.891 0.708 0.814 0.547 0.669 0.592 0.631 0.333 0.716 0.551 0.618 0.264  
+ CIoU [50] (applied) 0.918 0.792 0.881 0.566 0.687 0.702 0.690 0.340 0.694 0.619 0.664 0.274  
+Note: The best values are highlighted in bold.
+architecture. The results also demonstrate in addressing key challenges 
+such as low-contrast and small size in mass detection.
+Although the MANGA-YOLO has achieved a great performance, 
+there remains a potential to strengthen the overall detection accu-
+racy while preserving the model’s efficiency, which is essential for 
+practical application in clinical environments. In addition, the chal-
+lenges of detecting extremely small or overlapping masses in dense 
+breast tissue still require further optimization. Future extensions of this 
+work could explore the Convolutional Kolmogorov–Arnold Network 
+(ConvKAN) [57], and Kolmogorov–Arnold Transformer (KAT) [58], 
+which might obtain more important features in the backbone part to 
+solve some complex scenarios. Further optimizations in computational 
+efficiency could be considered by the usages of Omni-dimensional 
+Dynamic Convolution (ODConv) [59] and wavelet Convolutions (WT-
+Conv) [60], which are able to adopt good performance in a large 
+field without over-parametrization. This aspect can also be targeted to 
+ensure real-time deployment in resource-limited healthcare settings.
+CRediT authorship contribution statement
+Kien Trang: Writing – original draft, Visualization, Software, 
+Methodology, Investigation, Formal analysis, Conceptualization. 
+Fung Fung Ting: Writing – review & editing, Validation, 
+Supervision, Resources, Project administration, Funding acquisition, 
+Conceptualization. Bao Quoc Vuong: Writing – original draft, Re-
+sources. Chee-Ming Ting: Writing – review & editing, Supervision, 
+Resources, Conceptualization.
+Ethics statement
+This research presents an accurate account of the work performed, 
+all data presented are accurate and methodologies detailed enough to 
+permit others to replicate the work.
+This manuscript represents entirely original works and or if work 
+and/or words of others have been used, that this has been appropriately 
+cited or quoted and permission has been obtained where necessary.
+This material has not been published in whole or in part elsewhere.
+The manuscript is not currently being considered for publication in 
+another journal.
+The dataset used in this study is publicly available and adheres to 
+the ethical standards for data usage. No additional ethical concerns 
+arose during the course of this research. All research activities comply 
+with relevant guidelines and regulations.
+During the preparation of this work, the authors used Grammarly in 
+order to enhance clarity, grammar, and spelling of the manuscript. After 
+using this tool, the authors reviewed and edited the content as needed 
+and take full responsibility for the content of the published article.
+That generative AI and AI-assisted technologies have not been used 
+to create or alter images unless specifically used as part of the research 
+design where such use must be described in a reproducible manner in 
+the methods section.
+All authors have been personally and actively involved in substan-
+tive work leading to the manuscript and will hold themselves jointly 
+and individually responsible for its content.
+Declaration of competing interest
+The authors declare that they have no known competing finan-
+cial interests or personal relationships that could have appeared to 
+influence the work reported in this paper.
+References
+[1] J. Kim, et al., Global patterns and trends in breast cancer incidence and mortality 
+across 185 countries, Nature Med. (2025) http://dx.doi.org/10.1038/s41591-
+025-03502-3.
+[2] F.Z. Francies, R. Hull, R. Khanyile, Z. Dlamini, Breast cancer in low-middle 
+income countries: abnormality in splicing and lack of targeted treatment options, 
+Am. J. Cancer. Res. 10 (5) (2020) 1568–1591.
+[3] P. Zubor, et al., Why the gold standard approach by mammography demands 
+extension by multiomics? Application of liquid biopsy miRNA profiles to breast 
+cancer disease management, Int. J. Mol. Sci. 20 (12) (2019) http://dx.doi.org/
+10.3390/ijms20122878, Art. no. 12.
+[4] L. Tabár, B. Vitak, H.-H.T. Chen, M.-F. Yen, S.W. Duffy, R.A. Smith, Beyond 
+randomized controlled trials, Cancer 91 (9) (2001) 1724–1731, http://dx.doi.
+org/10.1002/1097-0142(20010501)91:9<1724::AID-CNCR1190>3.0.CO;2-V.
+[5] F.-Z. Nakach, A. Idri, E. Goceri, A comprehensive investigation of multimodal 
+deep learning fusion strategies for breast cancer classification, Artif. Intell. Rev. 
+57 (12) (2024) 327, http://dx.doi.org/10.1007/s10462-024-10984-z.
+[6] R. Girshick, J. Donahue, T. Darrell, J. Malik, Rich feature hierarchies for 
+accurate object detection and semantic segmentation, in: 2014 IEEE Conference 
+on Computer Vision and Pattern Recognition, 2014, pp. 580–587, http://dx.doi.
+org/10.1109/CVPR.2014.81.
+[7] K. He, G. Gkioxari, P. Dollar, R. Girshick, R-CNN. Mask, Mask R-CNN in 2017 
+IEEE International Conference on Computer Vision, ICCV, IEEE, Venice, 2017, 
+pp. 2980–2988, http://dx.doi.org/10.1109/ICCV.2017.322.
+[8] Z. Cai, N. Vasconcelos, Cascade R-CNN: Delving into high quality object 
+detection, in: 2018 IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition, 2018, pp. 6154–6162, http://dx.doi.org/10.1109/CVPR.2018.
+00644.
+[9] Y. Zhao, et al., DETRs beat YOLOs on real-time object detection, in: 2024 
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR, 
+IEEE, Seattle, WA, USA, 2024, pp. 16965–16974, http://dx.doi.org/10.1109/
+CVPR52733.2024.01605.
+[10] J. Redmon, S. Divvala, R. Girshick, A. Farhadi, You only look once: Unified, 
+real-time object detection, in: 2016 IEEE Conference on Computer Vision and 
+Pattern Recognition, CVPR, IEEE, Las Vegas, NV, USA, 2016, pp. 779–788, 
+http://dx.doi.org/10.1109/CVPR.2016.91.
+Computers in Biology and Medicine 199 (2025) 111339 
+12 
+K. Trang et al.
+[11] J. Redmon, A. Farhadi, YOLO9000: Better, faster, stronger, in: 2017 IEEE 
+Conference on Computer Vision and Pattern Recognition, CVPR, 2017, pp. 
+6517–6525, http://dx.doi.org/10.1109/CVPR.2017.690.
+[12] J. Redmon, A. Farhadi, YOLOv3: An incremental improvement, 2018, http:
+//dx.doi.org/10.48550/arXiv.1804.02767, arXiv: arXiv:1804.02767.
+[13] A. Bochkovskiy, C.-Y. Wang, H.-Y.M. Liao, YOLOv4: Optimal speed and accuracy 
+of object detection, 2020, http://dx.doi.org/10.48550/arXiv.2004.10934, arXiv: 
+arXiv:2004.10934.
+[14] J. Glenn, YOLOv5 (2020.05), 2020, [Online]. Available: https://github.com/
+ultralytics/yolov5.
+[15] C. Li, et al., YOLOv6: A single-stage object detection framework for industrial 
+applications, 2022, http://dx.doi.org/10.48550/arXiv.2209.02976, arXiv: arXiv:
+2209.02976.
+[16] C.-Y. Wang, A. Bochkovskiy, H.-Y.M. Liao, YOLOv7: Trainable bag-of-freebies 
+sets new state-of-the-art for real-time object detectors, in: 2023 IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, CVPR, IEEE, Vancouver, 
+BC, Canada, 2023, pp. 7464–7475, http://dx.doi.org/10.1109/CVPR52729.2023.
+00721.
+[17] J. Glenn, YOLOv8, 2024, [Online]. Available: https://github.com/ultralytics/
+ultralytics.
+[18] C.-Y. Wang, I.-H. Yeh, H.-Y.M. Liao, YOLOv9: Learning what you want to learn 
+using programmable gradient information, 2024, http://dx.doi.org/10.48550/
+arXiv.2402.13616, arXiv: arXiv:2402.13616.
+[19] A. Wang, et al., YOLOv10: Real-time end-to-end object detection, 2024, http:
+//dx.doi.org/10.48550/arXiv.2405.14458, arXiv: arXiv:2405.14458.
+[20] J. Glenn, YOLOv11 release v8.3.50, 2024, [Online]. Available: https://github.
+com/ultralytics/ultralytics/releases/tag/v8.3.50.
+[21] A. Gu, T. Dao, Mamba: Linear-time sequence modeling with selective state 
+spaces, 2024, http://dx.doi.org/10.48550/arXiv.2312.00752, arXiv: arXiv:2312.
+00752.
+[22] W. Yu, X. Wang, MambaOut: Do we really need mamba for vision?, 2024, 
+http://dx.doi.org/10.48550/arXiv.2405.07992, arXiv: arXiv:2405.07992.
+[23] B. Peng, Y. Liu, W. Wang, Q. Zhou, L. Fang, X. Zhu, Bidirectional copy–
+paste mamba for enhanced semi-supervised segmentation of transvaginal uterine 
+ultrasound images, Diagnostics 14 (13) (2024) http://dx.doi.org/10.3390/
+diagnostics14131423, Art. no. 13.
+[24] K. He, X. Zhang, S. Ren, J. Sun, Deep residual learning for image recognition, 
+in: 2016 IEEE Conference on Computer Vision and Pattern Recognition, CVPR, 
+2016, pp. 770–778, http://dx.doi.org/10.1109/CVPR.2016.90.
+[25] C. Szegedy, et al., Going deeper with convolutions, in: 2015 IEEE Conference on 
+Computer Vision and Pattern Recognition, CVPR, 2015, pp. 1–9, http://dx.doi.
+org/10.1109/CVPR.2015.7298594.
+[26] A. Krizhevsky, I. Sutskever, G.E. Hinton, ImageNet classification with deep 
+convolutional neural networks, in: Advances in Neural Information Processing 
+Systems, Curran Associates, Inc., 2012, Accessed: 31 December 2024. [Online].
+[27] S. Ren, K. He, R. Girshick, J. Sun, Faster R-CNN: Towards real-time object 
+detection with region proposal networks, in: Advances in Neural Information 
+Processing Systems, Curran Associates, Inc., 2015, Accessed: 31 December 2024. 
+[Online].
+[28] W. Liu, et al., SSD: Single shot multibox detector, in: B. Leibe, J. Matas, N. Sebe, 
+M. Welling (Eds.), Computer Vision – ECCV 2016, Springer International Pub-
+lishing, Cham, 2016, pp. 21–37, http://dx.doi.org/10.1007/978-3-319-46448-
+0_2.
+[29] T. Mahmood, J. Li, Y. Pei, F. Akhtar, M.U. Rehman, S.H. Wasti, Breast lesions 
+classifications of mammographic images using a deep convolutional neural 
+network-based approach, PLoS ONE 17 (1) (2022) e0263126, http://dx.doi.org/
+10.1371/journal.pone.0263126.
+[30] D.A. Ragab, O. Attallah, M. Sharkas, J. Ren, S. Marshall, A framework for breast 
+cancer classification using multi-DCNNs, Comput. Biol. Med. 131 (2021) 104245, 
+http://dx.doi.org/10.1016/j.compbiomed.2021.104245.
+[31] K. Belhaj Soulami, N. Kaabouch, M. Nabil Saidi, Breast cancer: Classification of 
+suspicious regions in digital mammograms based on capsule network, Biomed. 
+Signal Process. Control. 76 (2022) 103696, http://dx.doi.org/10.1016/j.bspc.
+2022.103696.
+[32] D. Muduli, R. Dash, B. Majhi, Automated diagnosis of breast cancer using multi-
+modal datasets: A deep convolution neural network based approach, Biomed. 
+Signal Process. Control. 71 (2022) 102825, http://dx.doi.org/10.1016/j.bspc.
+2021.102825.
+[33] B. Ibrokhimov, J.-Y. Kang, Two-stage deep learning method for breast cancer 
+detection using high-resolution mammogram images, Appl. Sci. 12 (9) (2022) 
+4616, http://dx.doi.org/10.3390/app12094616.
+[34] L. Chen, Y. Zhou, S. Xu, ERetinaNet: An efficient neural network based on 
+RetinaNet for mammographic breast mass detection, IEEE J. Biomed. Health 
+Informatics 28 (5) (2024) 2866–2878, http://dx.doi.org/10.1109/JBHI.2024.
+3371229.
+[35] T.-Y. Lin, P. Goyal, R. Girshick, K. He, P. Dollár, Focal loss for dense object 
+detection, IEEE Trans. Pattern Anal. Mach. Intell. 42 (2) (2020) 318–327, http:
+//dx.doi.org/10.1109/TPAMI.2018.2858826.
+[36] A. Baccouche, B. Garcia-Zapirain, C. Olea, A. Elmaghraby, Breast lesions de-
+tection and classification via YOLO-based fusion models, CMC 69 (1) (2021) 
+1407–1425, http://dx.doi.org/10.32604/cmc.2021.018461.
+[37] A.E. Quiñones-Espín, M. Perez-Diaz, R.M. Espín-Coto, D. Rodriguez-Linares, J.D. 
+Lopez-Cabrera, Automatic detection of breast masses using deep learning with 
+YOLO approach, Health Technol. 13 (6) (2023) 915–923, http://dx.doi.org/10.
+1007/s12553-023-00783-x.
+[38] F. Prinzi, M. Insalaco, A. Orlando, S. Gaglio, S. Vitabile, A yolo-based model for 
+breast cancer detection in mammograms, Cogn Comput. 16 (1) (2024) 107–120, 
+http://dx.doi.org/10.1007/s12559-023-10189-6.
+[39] Y. Su, Q. Liu, W. Xie, P. Hu, YOLO-LOGO: A transformer-based YOLO segmenta-
+tion model for breast mass detection and segmentation in digital mammograms, 
+Comput. Methods Programs Biomed. 221 (2022) 106903, http://dx.doi.org/10.
+1016/j.cmpb.2022.106903.
+[40] E. Mahoro, M.A. Akhloufi, Breast masses detection on mammograms using recent 
+one-shot deep object detectors, in: 2023 5th International Conference on Bio-
+Engineering for Smart Technologies, BioSMART, IEEE, Paris, France, 2023, pp. 
+1–4, http://dx.doi.org/10.1109/BioSMART58455.2023.10162036.
+[41] N.F. Razali, I.S. Isa, S.N. Sulaiman, N.K. Abdul Karim, M.K. Osman, Z.H. Che 
+Soh, Enhancement technique based on the breast density level for mammogram 
+for computer-aided diagnosis, Bioengineering 10 (2) (2023) http://dx.doi.org/
+10.3390/bioengineering10020153, Art. no. 2.
+[42] I.C. Moreira, I. Amaral, I. Domingues, A. Cardoso, M.J. Cardoso, J.S. Cardoso, 
+INbreast: Toward a full-field digital mammographic database, Academic Radiol. 
+19 (2) (2012) 236–248, http://dx.doi.org/10.1016/j.acra.2011.09.014.
+[43] H.T. Nguyen, et al., VinDr-Mammo: A large-scale benchmark dataset for 
+computer-aided diagnosis in full-field digital mammography, 2022, http://dx.
+doi.org/10.1101/2022.03.07.22272009, medRxiv.
+[44] R.S. Lee, F. Gimenez, A. Hoogi, K.K. Miyake, M. Gorovoy, D.L. Rubin, A curated 
+mammography data set for use in computer-aided detection and diagnosis 
+research, Sci. Data 4 (1) (2017) 170177, http://dx.doi.org/10.1038/sdata.2017.
+177.
+[45] D. Han, et al., Demystify mamba in vision: A linear attention perspective, 2024, 
+http://dx.doi.org/10.48550/arXiv.2405.16605, arXiv: arXiv:2405.16605.
+[46] S. Woo, J. Park, J.-Y. Lee, I.S. Kweon, CBAM: Convolutional block attention 
+module, in: V. Ferrari, M. Hebert, C. Sminchisescu, Y. Weiss (Eds.), Computer 
+Vision – ECCV 2018 11211, in: Lecture Notes in Computer Science, vol. 11211, 
+Springer International Publishing, Cham, 2018, pp. 3–19, http://dx.doi.org/10.
+1007/978-3-030-01234-2_1.
+[47] Z. Zheng, P. Wang, W. Liu, J. Li, R. Ye, D. Ren, Distance-IoU loss: Faster and 
+better learning for bounding box regression, Proc. the AAAI Conf. Artif. Intell. 
+34 (07) (2020) http://dx.doi.org/10.1609/aaai.v34i07.6999, Art. no. 07.
+[48] Z. Gevorgyan, SIoU loss: More powerful learning for bounding box regression, 
+2022, http://dx.doi.org/10.48550/arXiv.2205.12740, arXiv: arXiv:2205.12740.
+[49] Y.-F. Zhang, W. Ren, Z. Zhang, Z. Jia, L. Wang, T. Tan, Focal and efficient IOU 
+loss for accurate bounding box regression, Neurocomputing 506 (2022) 146–157, 
+http://dx.doi.org/10.1016/j.neucom.2022.07.042.
+[50] Z. Zheng, et al., Enhancing geometric factors in model learning and inference for 
+object detection and instance segmentation, IEEE Trans. Cybern. 52 (8) (2022) 
+8574–8586, http://dx.doi.org/10.1109/TCYB.2021.3095305.
+[51] Y. Dai, F. Gieseke, S. Oehmcke, Y. Wu, K. Barnard, Attentional feature fusion, 
+in: 2021 IEEE Winter Conference on Applications of Computer Vision, WACV, 
+IEEE, Waikoloa, HI, USA, 2021, pp. 3559–3568, http://dx.doi.org/10.1109/
+WACV48630.2021.00360.
+[52] Y. Wang, Y. Li, G. Wang, X. Liu, Multi-scale attention network for single image 
+super-resolution, in: 2024 IEEE/CVF Conference on Computer Vision and Pattern 
+Recognition Workshops, CVPRW, IEEE, Seattle, WA, USA, 2024, pp. 5950–5960, 
+http://dx.doi.org/10.1109/CVPRW63382.2024.00602.
+[53] X. Ding, X. Zhang, N. Ma, J. Han, G. Ding, J. Sun, RepVGG: Making VGG-style 
+ConvNets great again, in: 2021 IEEE/CVF Conference on Computer Vision and 
+Pattern Recognition, CVPR, IEEE, Nashville, TN, USA, 2021, pp. 13728–13737, 
+http://dx.doi.org/10.1109/CVPR46437.2021.01352.
+[54] D. Misra, T. Nalamada, A.U. Arasanipalai, Q. Hou, Rotate to attend: Convolu-
+tional triplet attention module, in: 2021 IEEE Winter Conference on Applications 
+of Computer Vision, WACV, 2021, pp. 3138–3147, http://dx.doi.org/10.1109/
+WACV48630.2021.00318.
+[55] J. Hu, L. Shen, S. Albanie, G. Sun, E. Wu, Squeeze-and-excitation networks, 2019, 
+http://dx.doi.org/10.48550/arXiv.1709.01507, arXiv: arXiv:1709.01507.
+[56] Q. Hou, D. Zhou, J. Feng, Coordinate attention for efficient mobile network 
+design, in: 2021 IEEE/CVF Conference on Computer Vision and Pattern Recog-
+nition, CVPR, IEEE, Nashville, TN, USA, 2021, pp. 13708–13717, http://dx.doi.
+org/10.1109/CVPR46437.2021.01350.
+[57] A.D. Bodner, A.S. Tepsich, J.N. Spolski, S. Pourteau, Convolutional Kolmogorov-
+Arnold networks, 2024, http://dx.doi.org/10.48550/arXiv.2406.13155, arXiv: 
+arXiv:2406.13155.
+[58] X. Yang, X. Wang, Kolmogorov-Arnold transformer, 2024, http://dx.doi.org/10.
+48550/arXiv.2409.10594, arXiv: arXiv:2409.10594.
+[59] C. Li, A. Zhou, A. Yao, Omni-dimensional dynamic convolution, 2022, http:
+//dx.doi.org/10.48550/arXiv.2209.07947, arXiv: arXiv:2209.07947.
+[60] S.E. Finder, R. Amoyal, E. Treister, O. Freifeld, Wavelet convolutions for large 
+receptive fields, in: A. Leonardis, E. Ricci, S. Roth, O. Russakovsky, T. Sattler, 
+G. Varol (Eds.), Computer Vision – ECCV 2024, Springer Nature Switzerland, 
+Cham, 2025, pp. 363–380, http://dx.doi.org/10.1007/978-3-031-72949-2_21.
+Computers in Biology and Medicine 199 (2025) 111339 
+13 
