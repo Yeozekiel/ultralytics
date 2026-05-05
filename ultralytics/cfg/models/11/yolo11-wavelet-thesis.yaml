@@ -1,0 +1,51 @@
+# Ultralytics YOLOv11-Wavelet Fixed Version
+nc: 1 # Ganti sesuai jumlah kelas Anda
+scales:
+  n: [0.50, 0.25, 1024] # Baseline Nano
+  # s: [0.50, 0.50, 1024]
+  # m: [0.50, 1.00, 512]
+  # l: [1.00, 1.00, 512]
+  # x: [1.00, 1.50, 512]
+
+# 0-P1/2, 1-P2/4, 2-P3/8, 3-P4/16, 4-P5/32
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]]      # 0: P1/2 (320x320)
+  
+  - [-1, 1, WaveletDown, [128]]    # 1: P2/4 (160x160) -> Detail P2 disimpan di index 1
+  - [-1, 3, C3k2, [128, False]]    # 2
+  
+  - [-1, 1, WaveletDown, [256]]    # 3: P3/8 (80x80)   -> Detail P3 disimpan di index 3
+  - [-1, 6, C3k2, [256, False]]    # 4
+  
+  - [-1, 1, WaveletDown, [512]]    # 5: P4/16 (40x40)  -> Detail P4 disimpan di index 5
+  - [-1, 6, C3k2, [512, True]]     # 6
+  
+  - [-1, 1, WaveletDown, [1024]]   # 7: P5/32 (20x20)  -> Downsample terakhir
+  - [-1, 3, C3k2, [1024, True]]    # 8
+  - [-1, 1, SPPF, [1024, 5]]       # 9: P5/32 Output
+  - [-1, 2, C2PSA, [1024]]         # 10: C2PSA
+
+head:
+  # UPSAMPLE 1: Dari P5 (8x8) ke P4 (16x16)
+  # Gunakan detail dari index 7 (yang merekam transisi P4->P5)
+  - [[-1, 7], 1, WaveletUp, [512]] # 11: Hasil IDWT = 16x16
+  - [[-1, 6], 1, Concat, [1]]      # 12: Cat dengan index 6 (16x16). MATCH!
+  - [-1, 3, C3k2, [512, False]]    # 13
+
+  # UPSAMPLE 2: Dari P4 (16x16) ke P3 (32x32)
+  # Gunakan detail dari index 5 (yang merekam transisi P3->P4)
+  - [[-1, 5], 1, WaveletUp, [256]] # 14: Hasil IDWT = 32x32
+  - [[-1, 4], 1, Concat, [1]]      # 15: Cat dengan index 4 (32x32). MATCH!
+  - [-1, 3, C3k2, [256, False]]    # 16
+
+  # Jalur Downsample kembali (PANet standard)
+  - [-1, 1, Conv, [256, 3, 2]]     # 17: P3 -> P4
+  - [[-1, 13], 1, Concat, [1]]     # 18: Cat dengan P4 (index 13)
+  - [-1, 3, C3k2, [512, False]]    # 19 (P4/16-medium)
+
+  - [-1, 1, Conv, [512, 3, 2]]     # 20: P4 -> P5
+  - [[-1, 10], 1, Concat, [1]]     # 21: Cat dengan P5 (index 10)
+  - [-1, 3, C3k2, [1024, True]]    # 22 (P5/32-large)
+
+  - [[16, 19, 22], 1, Detect, [nc]] # 23: Detect Head
