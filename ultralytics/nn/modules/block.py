@@ -295,17 +295,19 @@ class MACABlock(nn.Module):
 
         # ── Path 2: Contextual awareness ─────────────────────────────────
         # Paper: "standard 3×3 convolution" and "3×3 dilated convolution"
-        # (NOT depthwise – the paper explicitly says "standard")
-        self.conv  = nn.Conv2d(c1, c1, kernel_size=3, padding=1,              bias=False)
-        self.dconv = nn.Conv2d(c1, c1, kernel_size=3, padding=3, dilation=3,  bias=False)
+        self.conv  = nn.Conv2d(c1, c1, kernel_size=3, padding=1,             bias=False)
+        self.dconv = nn.Conv2d(c1, c1, kernel_size=3, padding=3, dilation=3, bias=False)
         # BN + PReLU applied after concatenation (eq. 9)
         self.bn_fuse = nn.BatchNorm2d(c1 * 2)
         self.prelu   = nn.PReLU()
-        # Global context MLP (eq. 10)
+        # Global context MLP with sigmoid gate (eq. 10).
+        # Sigmoid bounds the gate to [0,1] (SE-like) – prevents unbounded
+        # multiplicative scaling that causes NaN in mixed-precision training.
         self.mlp_context = nn.Sequential(
-            nn.Linear(c1 * 2, c1 * 2),
+            nn.Linear(c1 * 2, max(1, c1 // 2)),
             nn.ReLU(),
-            nn.Linear(c1 * 2, c1 * 2)
+            nn.Linear(max(1, c1 // 2), c1 * 2),
+            nn.Sigmoid(),   # ← gate must be bounded; raw ReLU output explodes in fp16
         )
         # 1×1 projection back to C channels (eq. 11 → eq. 12)
         self.proj_context = nn.Conv2d(c1 * 2, c1, kernel_size=1, bias=False)
@@ -313,44 +315,50 @@ class MACABlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
         N = H * W
+        dtype = x.dtype   # remember AMP dtype so we can cast back
 
         # ── Path 1: Mamba-inspired linear attention ───────────────────────
         # Flatten spatial → (B, N, C), apply LN
-        x_flat = x.reshape(B, C, N).permute(0, 2, 1)   # (B, N, C)
-        x_norm = self.norm(x_flat)                       # (B, N, C)
+        x_flat = x.reshape(B, C, N).permute(0, 2, 1)    # (B, N, C)
+        x_norm = self.norm(x_flat)                        # (B, N, C)
 
         # Q, K use ELU+1 kernel φ(·) to guarantee non-negativity (eq. 4)
-        q = F.elu(self.q(x_norm)) + 1.0   # (B, N, C)
-        k = F.elu(self.k(x_norm)) + 1.0   # (B, N, C)
-        v = self.v(x_norm)                 # (B, N, C)
+        q = F.elu(self.q(x_norm)) + 1.0    # (B, N, C)
+        k = F.elu(self.k(x_norm)) + 1.0    # (B, N, C)
+        v = self.v(x_norm)                  # (B, N, C)
 
-        # Global linear attention: S = K^T V ∈ (B, C, C),  Z = K^T 1 ∈ (B, C, 1)
-        k_t = k.permute(0, 2, 1)                       # (B, C, N)
-        S   = torch.bmm(k_t, v)                        # (B, C, C)  – eq. 5 S_i
-        Z   = k_t.sum(dim=-1, keepdim=True)            # (B, C, 1)  – eq. 5 Z_i
-
-        # γ = Q·S / Q·Z  (eq. 5)  shapes: num (B,N,C), den (B,N,1)
-        num   = torch.bmm(q, S)                        # (B, N, C)
-        den   = torch.bmm(q, Z) + 1e-6                 # (B, N, 1)  ← FIXED: bmm not .bmm()
-        gamma = num / den                               # (B, N, C)
+        # ── fp16 overflow fix ─────────────────────────────────────────────
+        # S = K^T V accumulates over N positions → magnitude O(N).
+        # For N=25600 (160×160) this overflows fp16 (max~65504).
+        # Solution: normalise by N so S, Z, num, den are all O(1), then
+        # the ratio γ = num/den is unchanged (N cancels) but never overflows.
+        q32 = q.float()
+        k32 = k.float()
+        v32 = v.float()
+        k_t = k32.permute(0, 2, 1)                        # (B, C, N)
+        S   = torch.bmm(k_t, v32) / N                     # (B, C, C)  O(1) per elem
+        Z   = k_t.mean(dim=-1, keepdim=True)              # (B, C, 1)  mean instead of sum
+        num = torch.bmm(q32, S)                           # (B, N, C)
+        den = torch.bmm(q32, Z).clamp(min=1e-6)           # (B, N, 1)  no ÷0
+        gamma = (num / den).to(dtype)                     # cast back to AMP dtype
+        # ──────────────────────────────────────────────────────────────────
 
         # eq. 8: Mamba = γ + MLP(Norm(γ))
-        f_mamba = gamma + self.mlp_mamba(self.norm_mamba(gamma))  # (B, N, C)
-        f_mamba = f_mamba.permute(0, 2, 1).reshape(B, C, H, W)    # (B, C, H, W)
+        f_mamba = gamma + self.mlp_mamba(self.norm_mamba(gamma))   # (B, N, C)
+        f_mamba = f_mamba.permute(0, 2, 1).reshape(B, C, H, W)     # (B, C, H, W)
 
         # ── Path 2: Contextual awareness (eq. 9-11) ───────────────────────
-        # Standard 3×3 conv + 3×3 dilated conv, then concat → BN → PReLU
-        f_conv  = self.conv(x)                               # (B, C, H, W)
-        f_dconv = self.dconv(x)                              # (B, C, H, W)
+        f_conv  = self.conv(x)                                       # (B, C, H, W)
+        f_dconv = self.dconv(x)                                      # (B, C, H, W)
         f_fused = self.prelu(self.bn_fuse(
-            torch.cat([f_conv, f_dconv], dim=1)))            # (B, 2C, H, W)
+            torch.cat([f_conv, f_dconv], dim=1)))                    # (B, 2C, H, W)
 
-        # Global context: GAP → MLP → broadcast (eq. 10)
-        f_gap    = F.adaptive_avg_pool2d(f_fused, 1).reshape(B, C * 2)  # (B, 2C)
-        f_global = self.mlp_context(f_gap).reshape(B, C * 2, 1, 1)      # (B, 2C, 1, 1)
+        # Gate: GAP → MLP+Sigmoid → bounded in [0,1] (eq. 10)
+        f_gap    = F.adaptive_avg_pool2d(f_fused, 1).reshape(B, C * 2)       # (B, 2C)
+        f_gate   = self.mlp_context(f_gap).reshape(B, C * 2, 1, 1)           # (B, 2C, 1, 1) ∈[0,1]
 
-        # Context: element-wise gate + project (eq. 11)
-        f_context = self.proj_context(f_fused * f_global)   # (B, C, H, W)
+        # Context: element-wise gating + project (eq. 11)
+        f_context = self.proj_context(f_fused * f_gate)              # (B, C, H, W)
 
         # ── Output (eq. 12): MACA = Mamba + context + x ──────────────────
         return f_mamba + f_context + x
@@ -421,14 +429,14 @@ class SCGABlock(nn.Module):
         channel   = self.sigmoid(self.mlp_channel(avg)).reshape(B, C, 1, 1)  # (B, C, 1, 1)
         f_enhance = x * channel                                         # eq. 15
 
-        # \u2500\u2500 Stage 2: Spatial attention (eq. 16-18) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # ── Stage 2: Spatial attention (eq. 16-18) ──────────────────────────
         max_out, _ = torch.max(f_enhance, dim=1, keepdim=True)          # GMP over channels
         avg_out    = torch.mean(f_enhance, dim=1, keepdim=True)         # GAP over channels
         max_avg    = torch.cat([max_out, avg_out], dim=1)               # eq. 16  (B, 2, H, W)
         f_spatial  = self.sigmoid(self.conv_spatial(max_avg))           # eq. 17  (B, 1, H, W)
         x_hat      = f_enhance * f_spatial                              # eq. 18  (B, C, H, W)
 
-        # \u2500\u2500 Stage 3: Cascaded group self-attention (eq. 19-24) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # ── Stage 3: Cascaded group self-attention (eq. 19-24) ────────────
         # Flatten spatial for transformer: (B, H*W, C)
         x_flat    = x_hat.reshape(B, C, H * W).permute(0, 2, 1)       # (B, N, C)
         # Split into h groups, each (B, N, head_dim)
@@ -445,9 +453,10 @@ class SCGABlock(nn.Module):
             qkv = self.qkv[i](x_i)               # (B, N, head_dim*3)
             q, k, v = qkv.chunk(3, dim=-1)       # each (B, N, head_dim)
 
-            # Scaled dot-product attention (eq. 20-21)
-            attn     = (q @ k.transpose(-2, -1)) * self.scale  # (B, N, N)
-            attn     = F.softmax(attn, dim=-1)
+            # Compute in fp32 to avoid overflow when N is large (e.g. 6400 for P3).
+            # Q@K^T can reach ~N * head_dim in magnitude before scaling → overflows fp16.
+            attn = (q.float() @ k.float().transpose(-2, -1)) * self.scale  # (B, N, N) fp32
+            attn = F.softmax(attn, dim=-1).to(x_hat.dtype)                 # back to AMP dtype
             tilde_xi = attn @ v                   # ~X_i  (B, N, head_dim)
 
             out_heads.append(tilde_xi)

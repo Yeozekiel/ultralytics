@@ -91,20 +91,26 @@ def main():
         device=args.device,
         optimizer=args.optimizer,
         lr0=args.lr0,
-        # Paper-aligned settings
-        box=7.5,          # box loss weight (ultralytics default)
-        cls=0.5,          # cls loss weight
-        dfl=1.5,          # DFL loss weight
-        # Augmentation (mild, appropriate for medical imaging)
-        hsv_h=0.0,        # no hue shift (grayscale-like mammograms)
-        hsv_s=0.0,        # no saturation shift
+        lrf=0.01,           # final lr = lr0 * lrf = 1e-4
+        momentum=0.937,     # AdamW beta1
+        weight_decay=0.0005,
+        warmup_epochs=3,
+        # Numerical stability
+        amp=True,           # mixed precision (AMP)
+        # Paper-aligned loss weights
+        box=7.5,
+        cls=0.5,
+        dfl=1.5,
+        # Augmentation — mild, appropriate for medical imaging (paper does not specify)
+        hsv_h=0.0,        # no hue (mammograms are grayscale)
+        hsv_s=0.0,        # no saturation
         hsv_v=0.4,        # small brightness variation
-        degrees=0.0,      # no rotation
+        degrees=0.0,
         translate=0.1,
         scale=0.5,
-        fliplr=0.5,       # horizontal flip augmentation
+        fliplr=0.5,
         flipud=0.0,
-        mosaic=0.0,       # disable mosaic (medical context)
+        mosaic=0.0,       # disabled — inappropriate for medical images
         mixup=0.0,
         # Output
         project=args.project,
@@ -112,8 +118,7 @@ def main():
         resume=args.resume,
         plots=True,
         save=True,
-        amp=False,
-        save_period=50,   # save checkpoint every 50 epochs
+        save_period=50,
         val=True,
     )
 
