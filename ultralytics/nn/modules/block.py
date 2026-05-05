@@ -264,68 +264,96 @@ class WaveletUp(nn.Module):
         return out
 
 class MACABlock(nn.Module):
-    """Single MACA block."""
+    """
+    Single Mamba-Inspired Attention with Contextual Awareness (MACA) block.
+
+    Implements two parallel paths (paper Section 3.4):
+      Path 1 – Mamba-inspired linear attention (eq. 4-8):
+        Q = φ(x W_Q), K = φ(x W_K), V = x W_V   (φ = ELU+1)
+        S = K^T V,  Z = K^T 1
+        γ = Q S / Q Z   (linear attention, eq. 5)
+        Mamba = γ + MLP(Norm(γ))                  (eq. 8)
+      Path 2 – Contextual awareness (eq. 9-11):
+        fused = PReLU(BN(cat(conv(x), dconv(x))))  (eq. 9)
+        global = MLP(GAP(fused))                   (eq. 10)
+        context = proj(fused ⊙ global)             (eq. 11)
+      Output: MACA = Mamba + context + x           (eq. 12)
+    """
     def __init__(self, c1: int):
         super().__init__()
+        # ── Path 1: Mamba-inspired linear attention ───────────────────────
         self.norm = nn.LayerNorm(c1)
         self.q = nn.Linear(c1, c1, bias=False)
         self.k = nn.Linear(c1, c1, bias=False)
         self.v = nn.Linear(c1, c1, bias=False)
-        
+        self.norm_mamba = nn.LayerNorm(c1)
         self.mlp_mamba = nn.Sequential(
             nn.Linear(c1, c1 * 2),
             nn.GELU(),
             nn.Linear(c1 * 2, c1)
         )
-        self.norm_mamba = nn.LayerNorm(c1)
-        
-        self.conv = nn.Conv2d(c1, c1, kernel_size=3, padding=1, groups=c1, bias=False)
-        self.dconv = nn.Conv2d(c1, c1, kernel_size=3, padding=3, dilation=3, groups=c1, bias=False)
+
+        # ── Path 2: Contextual awareness ─────────────────────────────────
+        # Paper: "standard 3×3 convolution" and "3×3 dilated convolution"
+        # (NOT depthwise – the paper explicitly says "standard")
+        self.conv  = nn.Conv2d(c1, c1, kernel_size=3, padding=1,              bias=False)
+        self.dconv = nn.Conv2d(c1, c1, kernel_size=3, padding=3, dilation=3,  bias=False)
+        # BN + PReLU applied after concatenation (eq. 9)
         self.bn_fuse = nn.BatchNorm2d(c1 * 2)
-        self.prelu = nn.PReLU()
-        
+        self.prelu   = nn.PReLU()
+        # Global context MLP (eq. 10)
         self.mlp_context = nn.Sequential(
             nn.Linear(c1 * 2, c1 * 2),
             nn.ReLU(),
             nn.Linear(c1 * 2, c1 * 2)
         )
-        
+        # 1×1 projection back to C channels (eq. 11 → eq. 12)
         self.proj_context = nn.Conv2d(c1 * 2, c1, kernel_size=1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
-        
-        x_flat = x.view(B, C, -1).permute(0, 2, 1)
-        x_norm = self.norm(x_flat)
-        
-        q = F.elu(self.q(x_norm)) + 1.0
-        k = F.elu(self.k(x_norm)) + 1.0
-        v = self.v(x_norm)
-        
-        k_t = k.permute(0, 2, 1)
-        S = torch.bmm(k_t, v)
-        Z = k_t.sum(dim=-1, keepdim=True)
-        
-        num = torch.bmm(q, S)
-        den = q.bmm(Z) + 1e-6
-        gamma = num / den
-        
-        f_mamba = gamma + self.mlp_mamba(self.norm_mamba(gamma))
-        f_mamba = f_mamba.permute(0, 2, 1).view(B, C, H, W)
-        
-        f_conv = self.conv(x)
-        f_dconv = self.dconv(x)
-        f_fused = torch.cat([f_conv, f_dconv], dim=1)
-        f_fused = self.prelu(self.bn_fuse(f_fused))
-        
-        f_global = F.adaptive_avg_pool2d(f_fused, (1, 1)).view(B, C * 2)
-        f_global = self.mlp_context(f_global).view(B, C * 2, 1, 1)
-        
-        f_context = f_fused * f_global
-        f_context = self.proj_context(f_context)
-        
-        out = f_mamba + f_context + x
-        return out
+        N = H * W
+
+        # ── Path 1: Mamba-inspired linear attention ───────────────────────
+        # Flatten spatial → (B, N, C), apply LN
+        x_flat = x.reshape(B, C, N).permute(0, 2, 1)   # (B, N, C)
+        x_norm = self.norm(x_flat)                       # (B, N, C)
+
+        # Q, K use ELU+1 kernel φ(·) to guarantee non-negativity (eq. 4)
+        q = F.elu(self.q(x_norm)) + 1.0   # (B, N, C)
+        k = F.elu(self.k(x_norm)) + 1.0   # (B, N, C)
+        v = self.v(x_norm)                 # (B, N, C)
+
+        # Global linear attention: S = K^T V ∈ (B, C, C),  Z = K^T 1 ∈ (B, C, 1)
+        k_t = k.permute(0, 2, 1)                       # (B, C, N)
+        S   = torch.bmm(k_t, v)                        # (B, C, C)  – eq. 5 S_i
+        Z   = k_t.sum(dim=-1, keepdim=True)            # (B, C, 1)  – eq. 5 Z_i
+
+        # γ = Q·S / Q·Z  (eq. 5)  shapes: num (B,N,C), den (B,N,1)
+        num   = torch.bmm(q, S)                        # (B, N, C)
+        den   = torch.bmm(q, Z) + 1e-6                 # (B, N, 1)  ← FIXED: bmm not .bmm()
+        gamma = num / den                               # (B, N, C)
+
+        # eq. 8: Mamba = γ + MLP(Norm(γ))
+        f_mamba = gamma + self.mlp_mamba(self.norm_mamba(gamma))  # (B, N, C)
+        f_mamba = f_mamba.permute(0, 2, 1).reshape(B, C, H, W)    # (B, C, H, W)
+
+        # ── Path 2: Contextual awareness (eq. 9-11) ───────────────────────
+        # Standard 3×3 conv + 3×3 dilated conv, then concat → BN → PReLU
+        f_conv  = self.conv(x)                               # (B, C, H, W)
+        f_dconv = self.dconv(x)                              # (B, C, H, W)
+        f_fused = self.prelu(self.bn_fuse(
+            torch.cat([f_conv, f_dconv], dim=1)))            # (B, 2C, H, W)
+
+        # Global context: GAP → MLP → broadcast (eq. 10)
+        f_gap    = F.adaptive_avg_pool2d(f_fused, 1).reshape(B, C * 2)  # (B, 2C)
+        f_global = self.mlp_context(f_gap).reshape(B, C * 2, 1, 1)      # (B, 2C, 1, 1)
+
+        # Context: element-wise gate + project (eq. 11)
+        f_context = self.proj_context(f_fused * f_global)   # (B, C, H, W)
+
+        # ── Output (eq. 12): MACA = Mamba + context + x ──────────────────
+        return f_mamba + f_context + x
 
 class MACA(nn.Module):
     """Mamba-Inspired Attention with Contextual Awareness (MACA) module."""
@@ -339,63 +367,100 @@ class MACA(nn.Module):
         return self.blocks(self.align(x))
 
 class SCGABlock(nn.Module):
-    """Single SCGA Block."""
+    """
+    Single Spatial and Channel Group Attention (SCGA) block.
+
+    Three-stage attention (paper Section 3.5):
+      Stage 1 – Channel attention (eq. 13-15):
+        avg = GAP(X)                    (eq. 13)
+        channel = σ(MLP(avg))           (eq. 14)
+        enhance = channel ⊙ X           (eq. 15)
+      Stage 2 – Spatial attention (eq. 16-18):
+        max-avg = [GMP(enhance) ⊕ GAP(enhance)]   (eq. 16)
+        spatial = σ(conv(max-avg))      (eq. 17)
+        X̂ = spatial ⊙ enhance           (eq. 18)
+      Stage 3 – Cascaded group self-attention (eq. 19-24):
+        Split X̂ into h groups; for head i:
+          X'_i = X̂_i + ~X_{i-1}        (eq. 22, cascaded residual)
+          Q_i, K_i, V_i = X'_i W_Q/K/V (eq. 19)
+          ~X_i = Softmax(Q_i K_i^T / √d_k) V_i  (eq. 20-21)
+        G = Concat[~X_i] W_P            (eq. 23)
+        SCGA = G ⊙ X̂                   (eq. 24)
+    """
     def __init__(self, c1: int, heads: int = 4):
         super().__init__()
+        assert c1 % heads == 0, f"SCGABlock: c1={c1} must be divisible by heads={heads}"
+        self.heads    = heads
+        self.head_dim = c1 // heads
+        scale         = self.head_dim ** -0.5
+
+        # Stage 1 – Channel attention MLP  (eq. 14)
         self.mlp_channel = nn.Sequential(
             nn.Linear(c1, max(1, c1 // 4), bias=False),
             nn.ReLU(),
-            nn.Linear(max(1, c1 // 4), c1, bias=False)
+            nn.Linear(max(1, c1 // 4), c1, bias=False),
         )
         self.sigmoid = nn.Sigmoid()
-        
+
+        # Stage 2 – Spatial attention conv  (eq. 17)
         self.conv_spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
-        
-        self.heads = heads
-        self.head_dim = c1 // heads
-        
-        self.qkv = nn.ModuleList([nn.Linear(self.head_dim, self.head_dim * 3, bias=False) for _ in range(heads)])
+
+        # Stage 3 – Per-head QKV projections  (eq. 19)
+        self.qkv  = nn.ModuleList(
+            [nn.Linear(self.head_dim, self.head_dim * 3, bias=False) for _ in range(heads)]
+        )
+        self.scale = scale
+        # Output projection W_P  (eq. 23)
         self.proj = nn.Linear(c1, c1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
-        
-        avg_pool = F.adaptive_avg_pool2d(x, (1, 1)).view(B, C)
-        f_channel = self.sigmoid(self.mlp_channel(avg_pool)).view(B, C, 1, 1)
-        f_enhance = x * f_channel
-        
-        max_out, _ = torch.max(f_enhance, dim=1, keepdim=True)
-        avg_out = torch.mean(f_enhance, dim=1, keepdim=True)
-        spatial_cat = torch.cat([max_out, avg_out], dim=1)
-        f_spatial = self.sigmoid(self.conv_spatial(spatial_cat))
-        x_hat = f_enhance * f_spatial
-        
-        x_hat_flat = x_hat.view(B, C, H * W).permute(0, 2, 1)
-        head_splits = torch.split(x_hat_flat, self.head_dim, dim=-1)
-        
-        out_heads = []
-        prev_tilde = 0
-        
+
+        # \u2500\u2500 Stage 1: Channel attention (eq. 13-15) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        avg       = F.adaptive_avg_pool2d(x, 1).reshape(B, C)          # (B, C)
+        channel   = self.sigmoid(self.mlp_channel(avg)).reshape(B, C, 1, 1)  # (B, C, 1, 1)
+        f_enhance = x * channel                                         # eq. 15
+
+        # \u2500\u2500 Stage 2: Spatial attention (eq. 16-18) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        max_out, _ = torch.max(f_enhance, dim=1, keepdim=True)          # GMP over channels
+        avg_out    = torch.mean(f_enhance, dim=1, keepdim=True)         # GAP over channels
+        max_avg    = torch.cat([max_out, avg_out], dim=1)               # eq. 16  (B, 2, H, W)
+        f_spatial  = self.sigmoid(self.conv_spatial(max_avg))           # eq. 17  (B, 1, H, W)
+        x_hat      = f_enhance * f_spatial                              # eq. 18  (B, C, H, W)
+
+        # \u2500\u2500 Stage 3: Cascaded group self-attention (eq. 19-24) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # Flatten spatial for transformer: (B, H*W, C)
+        x_flat    = x_hat.reshape(B, C, H * W).permute(0, 2, 1)       # (B, N, C)
+        # Split into h groups, each (B, N, head_dim)
+        groups    = x_flat.split(self.head_dim, dim=-1)
+
+        out_heads  = []
+        prev_tilde: torch.Tensor | int = 0   # ~X_{i-1}, zero for i=1 (eq. 22)
+
         for i in range(self.heads):
-            x_i = head_splits[i] + prev_tilde
-            
-            qkv = self.qkv[i](x_i)
-            q, k, v = qkv.chunk(3, dim=-1)
-            
-            attn = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
-            attn = F.softmax(attn, dim=-1)
-            tilde_x_i = attn @ v
-            
-            out_heads.append(tilde_x_i)
-            prev_tilde = tilde_x_i
-            
-        G = torch.cat(out_heads, dim=-1)
-        G = self.proj(G)
-        
-        G = G.permute(0, 2, 1).view(B, C, H, W)
-        
-        f_scga = G * x_hat
-        return f_scga
+            # Cascaded residual input (eq. 22): X'_i = X̂_i + ~X_{i-1}
+            x_i = groups[i] + prev_tilde          # (B, N, head_dim)
+
+            # QKV projection (eq. 19)
+            qkv = self.qkv[i](x_i)               # (B, N, head_dim*3)
+            q, k, v = qkv.chunk(3, dim=-1)       # each (B, N, head_dim)
+
+            # Scaled dot-product attention (eq. 20-21)
+            attn     = (q @ k.transpose(-2, -1)) * self.scale  # (B, N, N)
+            attn     = F.softmax(attn, dim=-1)
+            tilde_xi = attn @ v                   # ~X_i  (B, N, head_dim)
+
+            out_heads.append(tilde_xi)
+            prev_tilde = tilde_xi
+
+        # Concatenate all heads and project (eq. 23): G = Concat[~X_i] W_P
+        G = self.proj(torch.cat(out_heads, dim=-1))   # (B, N, C)
+
+        # Reshape back to spatial
+        G = G.permute(0, 2, 1).reshape(B, C, H, W)   # (B, C, H, W)
+
+        # Final output (eq. 24): SCGA = G ⊙ X̂
+        return G * x_hat
 
 class SCGA(nn.Module):
     """Spatial and Channel Group Attention (SCGA) module."""
