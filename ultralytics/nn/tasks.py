@@ -72,9 +72,17 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     YOLOESegment26,
     v10Detect,
+    WaveletDown,
+    WaveletUp,
+    WaveletDetailBlock,
+    WTConv,
+    MACA,
+    SCGA,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, SETTINGS, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import REMOTE_FILE_PREFIXES, check_file, check_requirements, check_suffix, check_yaml
+from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
+from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
     E2ELoss,
     PoseLoss26,
@@ -171,6 +179,9 @@ class BaseModel(torch.nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt, embeddings = [], [], []  # outputs
+
+        self.wavelet_buffer = {}
+
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
         for m in self.model:
@@ -178,14 +189,30 @@ class BaseModel(torch.nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
+            
+            if isinstance(m, WaveletDown):
+                x, high_freq = m(x)
+                self.wavelet_buffer[m.i] = high_freq
+
+            elif isinstance(m, WaveletUp):
+                target_backbone_idx = m.f[1]
+                high_freq = self.wavelet_buffer.get(target_backbone_idx)
+                spatial_x = x[0] if isinstance(x, list) else x
+                x = m(spatial_x, high_freq)
+
+            else:
+                x = m(x)  # run
+
             y.append(x if m.i in self.save else None)  # save output
+
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if m.i in embed:
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max_idx:
+                    self.wavelet_buffer.clear()
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        self.wavelet_buffer.clear()
         return x
 
     def _predict_augment(self, x):
@@ -391,6 +418,7 @@ class DetectionModel(BaseModel):
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+        self.wavelet_buffer = {}
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
 
@@ -1578,6 +1606,11 @@ def parse_model(d, ch, verbose=True):
         {
             Classify,
             Conv,
+            WTConv,
+            WaveletDown,
+            WaveletDetailBlock,
+            MACA,
+            SCGA,
             ConvTranspose,
             GhostConv,
             Bottleneck,
@@ -1629,6 +1662,8 @@ def parse_model(d, ch, verbose=True):
             C2fCIB,
             C2PSA,
             A2C2f,
+            MACA,
+            SCGA,
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -1716,6 +1751,15 @@ def parse_model(d, ch, verbose=True):
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
+        elif m is WaveletUp:
+            c1 = ch[f[0]]
+            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            all_layers_configs = d["backbone"] + d["head"]
+            wavelet_down_config = all_layers_configs[f[1]]
+            source_idx = wavelet_down_config[0]
+            actual_source_idx = f[1] - 1 if source_idx == -1 else (source_idx[0] if isinstance(source_idx, list) else source_idx)
+            c_high = ch[actual_source_idx]
+            args = [c1, c2, c_high, *args[1:]]
         else:
             c2 = ch[f]
 
